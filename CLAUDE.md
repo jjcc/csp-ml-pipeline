@@ -14,15 +14,27 @@ pip install -r requirements.txt
 Change 2 lines at the top of `config.yaml`, then run the pipeline in order:
 
 ```bash
+# --- Data ingestion (per new batch) ---
 python pipeline/a01_build_features.py   # build enriched dataset
 python pipeline/a02_collect_events.py   # collect corporate events
 python pipeline/a03_filter_trades.py    # filter trades near events
 python pipeline/a04_label_data.py       # label with win/loss outcomes
+
+# --- Training dataset ---
 python pipeline/a05_merge_datasets.py   # build rolling-window training set
+
+# --- Winner classifier (which trades are likely profitable?) ---
 python pipeline/b01_train_winner.py     # train winner classifier
 python pipeline/b02_score_winner.py     # score new candidates
+
+# --- Tail classifier (which trades are likely catastrophic losers?) ---
+python pipeline/b03_train_tail.py       # train tail-loss classifier
+python pipeline/b04_score_tail.py       # flag likely fat-tail losers
+
 pytest test/                            # run tests
 ```
+
+See `INSTRUCTIONS.md` for the full end-to-end workflow with decision guidance.
 
 ---
 
@@ -117,17 +129,20 @@ csp_ml_rewrite/
 │   ├── a02_collect_events.py      step 2: scrape EDGAR earnings + yfinance splits
 │   ├── a03_filter_trades.py       step 3: drop trades near earnings / splits
 │   ├── a04_label_data.py          step 4: fetch expiry prices, compute PnL, label win/loss
-│   ├── a05_merge_datasets.py      step 5 (optional): walk-forward dataset merging
-│   ├── b01_train_winner.py        train winner classifier with OOF cross-validation
-│   └── b02_score_winner.py        score new candidates
+│   ├── a05_merge_datasets.py      step 5: build rolling-window training set
+│   ├── b01_train_winner.py        train winner classifier (likely profitable trades)
+│   ├── b02_score_winner.py        score new candidates with winner model
+│   ├── b03_train_tail.py          train tail classifier (likely catastrophic losers)
+│   └── b04_score_tail.py          flag likely fat-tail losers
 │
 ├── service/                       ← reusable library modules
-│   ├── constants.py               ← feature lists (BASE_FEATS, GEX_FEATS, NEW_FEATS)
-│   │                                 and all magic numbers / defaults
+│   ├── constants.py               ← feature lists (BASE_FEATS, GEX_FEATS, NEW_FEATS,
+│   │                                 TAIL_FEATS, TAIL_EARNINGS_FEATS) + defaults
 │   ├── env_config.py              ← YAML + .env config loader with template resolution
 │   ├── data_prepare.py            ← price caching, capital calc, macro feature engineering
 │   ├── preprocess.py              ← DTE calc, normalised returns, GEX merge
-│   ├── winner_scoring.py          ← threshold selection, model loading, prediction
+│   ├── winner_scoring.py          ← winner model loading, threshold selection, scoring
+│   ├── tail_scoring.py            ← tail model loading, threshold selection, scoring
 │   ├── utils.py                   ← shared prep functions, threshold helpers
 │   ├── stock_data_manager.py      ← batch price updates with caching
 │   ├── production_data.py         ← feature engineering for live / on-fly scoring
@@ -157,22 +172,30 @@ csp_ml_rewrite/
 ```
 Raw CSP snapshots (option/put/put25_*/coveredPut_*.csv)
   ↓  [a01_build_features]
-output/data_prep/trades_with_gex_macro_<tag>.csv   + symbols file
+output/data_prep/trades_with_gex_macro_<section>.csv   + symbols file
   ↓  [a02_collect_events]
 output/data_prep/corp_events/events_<tag>.csv
   ↓  [a03_filter_trades]
 option/put/filtered/trades_filtered_<tag>.csv
   ↓  [a04_label_data]
-output/data_labeled/labeled_<tag>_filtered.csv
-  ↓  [a05_merge_datasets — optional]
-output/data_merged/merged_with_gex_macro_<combo>.csv
-  ↓  [a04_label_data — merge mode]
-output/data_labeled/labeled_merged_with_gex_macro_<combo>.csv
-  ↓  [b01_train_winner]
-output/winner_train/v9_oof_<combo>/winner_classifier_model_<combo>_lgbm.pkl
-  ↓  [b02_score_winner]
-output/winner_score/v9_model_<combo>/scores_winner_lgbm_<tag>.csv
+output/data_labeled/labeled_trades_<section>.csv
+  ↓  [a05_merge_datasets]
+output/data_merged/merged_roll{W}w_{YYYYMMDD}.csv     ← rolling window of last W weeks
+          │
+          ├──────────────────────────────────────────┐
+          ↓  [b01_train_winner]                      ↓  [b03_train_tail]
+output/winner_train/v9_roll{W}w_{YYYYMMDD}/          output/tails_train/v9_roll{W}w_{YYYYMMDD}/
+  winner_classifier_model_{YYYYMMDD}_lgbm.pkl          tail_classifier_model_{YYYYMMDD}.pkl
+          ↓  [b02_score_winner]                      ↓  [b04_score_tail]
+output/winner_score/v9_roll{W}w_{YYYYMMDD}/          output/tails_score/v9_roll{W}w_{YYYYMMDD}/
+  scores_{YYYYMMDD}.csv                               tail_scores_{YYYYMMDD}.csv
 ```
+
+The two classifiers answer different questions on the same scored batch:
+- **Winner (b01/b02)**: `win_proba` — which trades are *likely profitable*?
+- **Tail (b03/b04)**: `tail_proba` — which trades are *likely catastrophic losers*?
+
+Practical trading filter: `win_predict == 1 AND is_tail_pred == 0`
 
 ---
 
@@ -219,7 +242,8 @@ See "Rolling Window Design" section above for the full placeholder table.
 | `env_config.py` | YAML + .env config with template resolution |
 | `data_prepare.py` | Price caching, capital calculation, macro features |
 | `preprocess.py` | DTE calc, normalised returns, GEX snapshot merging |
-| `winner_scoring.py` | Model loading, threshold selection, scoring |
+| `winner_scoring.py` | Winner model loading, threshold selection, scoring |
+| `tail_scoring.py` | Tail model loading, TailModelPack, threshold selection, scoring |
 | `utils.py` | Data-prep helpers, threshold-search utilities |
 | `stock_data_manager.py` | Batch yfinance price downloads with parquet cache |
 | `production_data.py` | On-fly feature engineering for live data |

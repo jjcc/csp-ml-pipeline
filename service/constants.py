@@ -48,11 +48,40 @@ NEW_FEATS = [
     "log1p_DTE",
 ]
 
-# GEX subset used by winner and tail models (excludes redundant columns)
+# GEX subset used by winner model (excludes redundant columns)
 WINNER_GEX_FEATS = [
     "gex_neg",
     "gex_center_abs_strike",
     "gex_total_abs",
+]
+
+# Lean feature set used by tail classifier — derived from feature-importance
+# analysis on the old project; focuses on return/volatility regime signals.
+# Earnings-window features are appended at runtime when WITH_EARNINGS=True.
+TAIL_FEATS = [
+    "potentialReturnAnnual",
+    "VIX",
+    "impliedVolatilityRank1y",
+    "daysToExpiration",
+    "underlyingLastPrice",
+    "gex_center_abs_strike",
+    "log1p_DTE",
+    "prev_close_minus_ul_pct",
+    "gex_neg",
+    "potentialReturn",
+    "gex_pos",
+    "strike",
+    "percentToBreakEvenBid",
+    "gex_total_abs",
+    "gex_flip_strike",
+    "gex_gamma_at_ul",
+]
+
+# Optional earnings context features (appended to TAIL_FEATS when available)
+TAIL_EARNINGS_FEATS = [
+    "is_earnings_week",
+    "is_earnings_window",
+    "post_earnings_within_3d",
 ]
 
 # All features combined (training default when WINNER_FEATURES is not set)

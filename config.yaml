@@ -247,39 +247,53 @@ winnerscore:
   auto_calibrate:    1       # 1 = data-driven threshold (requires labels in scored CSV)
 
 # ============================================================
-# Tail Loss Model  (optional; staging/train_tail_with_gex.py)
+# Tail Loss Classifier training  (b03_train_tail.py)
+#
+# Uses the same rolling-window merged CSV as b01 (output of a05).
+# Template paths resolved from active_score_date and rolling_window_weeks.
 # ============================================================
 tail:
-  out_dir:           "output/tails_train/v6b_we"
-  model_out:         "tail_model_gex_v6b_ne_cut05.pkl"
-  imp_out:           "tail_gex_v6b_ne_cut05_feature_importances.csv"
-  scores_out:        "tail_gex_v6b_ne_cut05_scores_oof.csv"
-  metrics_out:       "tail_train_metrics_v6b_ne_cut05.json"
-  save_scores_sample: 40000
-  label_on:          "per_month"    # raw | annualized | per_month
-  pct:               0.05           # worst fraction by dollar PnL
-  cv_type:           "stratified"   # stratified | time
+  # Shared with winner — both train on the same rolling-window dataset
+  input:       "output/data_merged/merged_roll{rolling_window_weeks}w_{active_score_date}.csv"
+  output_dir:  "output/tails_train/v9_roll{rolling_window_weeks}w_{active_score_date}/"
+
+  model_name:        "tail_classifier_model"   # suffix _{date}.pkl added by b03
+  model_type:        "gbm"         # gbm (GradientBoosting) | lgbm
+  label_on:          "return_mon"  # return_mon | return_ann | return_pct | return_per_day
+  pct:               0.05          # worst fraction to label as tail (5%)
+  cv_type:           "stratified"  # stratified | time
   folds:             8
   seed:              42
-  out_dir_general:   "output"
+  with_earnings:     1             # 1 = include is_earnings_week / is_earnings_window if present
+  save_scores_sample: 40000
 
-tail_scoring:
-  score_input:    "output/labeled_trades_enriched2.csv"
-  score_out:      "output/tails_score/scored_with_tail_pct_mon_cut5_new.csv"
-  keep_proba_col: "tail_proba"
-  pred_col:       "is_tail_preda"
-  threshold:      0.030
+# ============================================================
+# Tail Loss Classifier scoring  (b04_score_tail.py)
+#
+# Template paths resolved from active_score_date and rolling_window_weeks.
+# ============================================================
+tailscoring:
+  score_input:      "output/data_labeled/{active_score_labeled_csv}"
+  model_in:         "output/tails_train/v9_roll{rolling_window_weeks}w_{active_score_date}/tail_classifier_model_{active_score_date}.pkl"
+  score_out_folder: "output/tails_score/v9_roll{rolling_window_weeks}w_{active_score_date}"
+  score_out:        "tail_scores_{active_score_date}.csv"
+  proba_col:        "tail_proba"
+  pred_col:         "is_tail_pred"
+  threshold:        ""             # empty = use best-F1 threshold from model pack
+  target_precision: ""             # optional: auto-select threshold at this precision
+  target_recall:    ""             # optional: auto-select threshold at this recall
 
 # ============================================================
 # Evaluation  (eval/eval_classifier.py)
 # ============================================================
 evaluation:
-  input:           "output/tails_score/scored_with_tail_pct_mon_cut5_new.csv"
-  output_dir:      "output/eval/tail_scored/"
-  proba_col:       "tail_proba"
+  # Point at any scored CSV — winner or tail — then adjust proba_col and label_mode
+  input:           "output/winner_score/v9_roll{rolling_window_weeks}w_{active_score_date}/scores_{active_score_date}.csv"
+  output_dir:      "output/eval/v9_roll{rolling_window_weeks}w_{active_score_date}/"
+  proba_col:       "win_proba"   # or "tail_proba" for tail evaluation
   fixed_thresholds: ""
   target_recall:   "0.86,0.92"
-  label_mode:      "tail_pct"    # winner | tail_pct | tail_pnl | provided
+  label_mode:      "winner"      # winner | tail_pct | tail_pnl | provided
   tail_k:          0.05
   label_col:       ""
   return_col:      "return_mon"
