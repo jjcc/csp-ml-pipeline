@@ -1,0 +1,15 @@
+.env
+/data
+venv/
+output/
+__pycache__/
+test/data/
+gpt_downloaded/
+models/
+.venv/
+option/
+gex101/
+prod/
+catboost_info/
+temp/
+log/

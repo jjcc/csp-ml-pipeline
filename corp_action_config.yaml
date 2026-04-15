@@ -1,0 +1,57 @@
+# Required: identify yourself to the SEC
+user_agent: "Jay Chen jchen@apption.com"
+
+# Input tickers
+tickers_file: "output/data_prep/corp_events/symbols_in_option_data_a.txt"
+
+# Date window (inclusive)
+date_range:
+  start: "2025-04-25"
+  end: "2025-08-08"
+
+# Output - unified CSV with both earnings and splits
+output_csv: "output/data_prep/corp_events/events_apr25_aug08.csv"
+
+# Behavior
+sleep_seconds: 0.3    # be polite to SEC
+cache_dir: "output/data_prep/.edgar_cache"
+
+# Safety valve: max number of 8-K primary docs fetched per ticker (in-range)
+max_8k_fetch_per_ticker: 50
+
+# Stock splits collection (uses yfinance API)
+collect_splits: true  # Set to false to skip split collection
+
+# ===== Trade Filtering Configuration (a02) =====
+
+# Input: Raw option trades to filter
+trades_input_csv: "option/put/unprocessed/trades_raw_orig.csv"
+
+# Output: Filtered trades (events-proximity removed)
+filtered_trades_csv: "option/put/filtered/trades_filtered_orig.csv"
+
+# Optional: Save excluded trades for analysis
+keep_filtered_trades: true
+filtered_out_csv: "option/put/filtered/trades_excluded_orig.csv"
+
+# Exclusion windows: Remove trades near corporate events
+# Logic:
+#   - Trade phase: Exclude if tradeTime is within window of any event
+#   - Expiry phase: Exclude if expirationDate is within window of any event
+exclusion_windows:
+  earnings:
+    days_before_trade: 2   # Don't open trades 2 days before earnings
+    days_after_trade: 1    # Don't open trades 1 day after earnings
+    days_before_expiry: 7  # Don't expire within 7 days before earnings
+    days_after_expiry: 1   # Don't expire within 1 day after earnings
+
+  split:
+    days_before_trade: 5   # Don't open trades 5 days before split
+    days_after_trade: 3    # Don't open trades 3 days after split
+    days_before_expiry: 10 # Don't expire within 10 days before split
+    days_after_expiry: 5   # Don't expire within 5 days after split
+
+# Column names in trades CSV
+symbol_col: "baseSymbol"
+trade_date_col: "tradeTime"
+expiry_col: "expirationDate"

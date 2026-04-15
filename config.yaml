@@ -1,0 +1,298 @@
+# ============================================================
+# CSP ML Pipeline — Unified Configuration
+# ============================================================
+#
+# Change only these 3 lines to control the entire pipeline:
+#
+#   active_train_profile   — which merged dataset to train on
+#   active_score_dataset   — which dataset to score
+#   active_process_dataset — which dataset a01/a02/a03 should process
+#
+# Valid dataset tags: orig, a, b, c, d, e, f  (add more in common_configs below)
+# ============================================================
+
+active_train_profile:   "origabcde"   # Training:   orig | origa | origab | … | origabcde
+active_score_dataset:   "f"           # Scoring:    a | b | c | d | e | f
+active_process_dataset: "f"           # Processing (a01/a02/a03): orig | a | b | … | f
+
+# ============================================================
+# Dataset registry  (add a new block here when ingesting a new batch)
+# ============================================================
+common_configs:
+
+  # ---- Original training set (Apr–Aug 2025) ----
+  original: &original_config
+    data_dir:             "option/put/unprocessed"
+    data_basic_csv:       "trades_raw_orig.csv"
+    output_csv:           "labeled_trades_with_gex_macro_orig.csv"
+    cutoff_date:          "2025-08-16"
+    events_start_date:    "2025-04-25"
+    events_end_date:      "2025-08-11"
+    events_output:        "output/data_prep/corp_events/events_orig.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_orig.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_orig.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_orig.csv"
+
+  # ---- Set A: Aug 11–29, 2025 ----
+  aug_11: &aug_11_config
+    data_dir:             "option/put/put25_0811-0829"
+    data_basic_csv:       "trades_raw_a_0811.csv"
+    output_csv:           "labeled_trades_a_0811.csv"
+    cutoff_date:          "2025-09-13"
+    events_start_date:    "2025-08-11"
+    events_end_date:      "2025-08-29"
+    events_output:        "output/data_prep/corp_events/events_a.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_a.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_a.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_a.csv"
+
+  # ---- Set B: Sep 1–12, 2025 ----
+  sep_1: &sep_1_config
+    data_dir:             "option/put/put25_0901-0912"
+    data_basic_csv:       "trades_raw_b_0901.csv"
+    output_csv:           "labeled_trades_b_0901.csv"
+    cutoff_date:          "2025-09-20"
+    events_start_date:    "2025-09-01"
+    events_end_date:      "2025-09-12"
+    events_output:        "output/data_prep/corp_events/events_b.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_b.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_b.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_b.csv"
+
+  # ---- Set C: Sep 15–26, 2025 ----
+  sep_15: &sep_15_config
+    data_dir:             "option/put/put25_0915-0926"
+    data_basic_csv:       "trades_raw_c_0915.csv"
+    output_csv:           "labeled_trades_c_0915.csv"
+    cutoff_date:          "2025-10-04"
+    events_start_date:    "2025-09-15"
+    events_end_date:      "2025-09-26"
+    events_output:        "output/data_prep/corp_events/events_c.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_c.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_c.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_c.csv"
+
+  # ---- Set D: Sep 29 – Oct 10, 2025 ----
+  sep_29: &sep_29_config
+    data_dir:             "option/put/put25_0929-1010"
+    data_basic_csv:       "trades_raw_d_0929.csv"
+    output_csv:           "labeled_trades_d_0929.csv"
+    cutoff_date:          "2025-10-18"
+    events_start_date:    "2025-09-29"
+    events_end_date:      "2025-10-10"
+    events_output:        "output/data_prep/corp_events/events_d.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_d.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_d.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_d.csv"
+
+  # ---- Set E: Oct 13–24, 2025 ----
+  oct_13: &oct_13_config
+    data_dir:             "option/put/put25_1013-1024"
+    data_basic_csv:       "trades_raw_e_1013.csv"
+    output_csv:           "labeled_trades_e_1013.csv"
+    cutoff_date:          "2025-11-01"
+    events_start_date:    "2025-10-13"
+    events_end_date:      "2025-10-24"
+    events_output:        "output/data_prep/corp_events/events_e.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_e.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_e.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_e.csv"
+
+  # ---- Set F: Oct 27 – Nov 7, 2025 ----
+  oct_27: &oct_27_config
+    data_dir:             "option/put/put25_1027-1107"
+    data_basic_csv:       "trades_raw_f_1027.csv"
+    output_csv:           "labeled_trades_f_1027.csv"
+    cutoff_date:          "2025-11-15"
+    events_start_date:    "2025-10-27"
+    events_end_date:      "2025-11-07"
+    events_output:        "output/data_prep/corp_events/events_f.csv"
+    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_f.txt"
+    filtered_trades_csv:  "option/put/filtered/trades_filtered_f.csv"
+    filtered_out_csv:     "option/put/filtered/trades_excluded_f.csv"
+
+  # ---- Template: copy + rename when adding a new batch ----
+  # new_batch: &new_batch_config
+  #   data_dir:             "option/put/put25_MMDD-MMDD"
+  #   data_basic_csv:       "trades_raw_g_MMDD.csv"
+  #   output_csv:           "labeled_trades_g_MMDD.csv"
+  #   cutoff_date:          "YYYY-MM-DD"
+  #   events_start_date:    "YYYY-MM-DD"
+  #   events_end_date:      "YYYY-MM-DD"
+  #   events_output:        "output/data_prep/corp_events/events_g.csv"
+  #   tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_g.txt"
+  #   filtered_trades_csv:  "option/put/filtered/trades_filtered_g.csv"
+  #   filtered_out_csv:     "option/put/filtered/trades_excluded_g.csv"
+
+# ============================================================
+# Output directory layout
+# ============================================================
+common:
+  output_dir: "output"
+  data_prep:  "data_prep"
+  labeled:    "data_labeled"
+
+# ============================================================
+# Raw data / snapshot settings  (a01_build_features)
+# ============================================================
+data:
+  glob:           "coveredPut_*.csv"
+  target_time:    "11:00"
+  batch_size:     30
+  all_snapshots:  0
+  refresh_cache:  0
+  cache_dir:      "output"
+
+# ============================================================
+# GEX feature settings
+# ============================================================
+gex:
+  base_dir:    "gex101"
+  target_time: "11:00"
+  filter:      0
+
+# ============================================================
+# VIX and macro price settings
+# ============================================================
+macro:
+  vix_csv:     "output/vix_data.csv"
+  px_base_dir: "output/price_cache"
+
+# ============================================================
+# Earnings calendar (optional enrichment)
+# ============================================================
+fundamentals:
+  earnings_csv: "output/symbol_info/earnings_calendar.csv"
+
+# ============================================================
+# Winner Classifier training  (b01_train_winner)
+#
+# Template paths — {active_train_profile} is resolved automatically.
+# ============================================================
+winner:
+  input:       "output/data_labeled/labeled_merged_with_gex_macro_{active_train_profile}.csv"
+  output_dir:  "output/winner_train/v9_oof_{active_train_profile}/"
+
+  train_target:           "return_mon"   # return_mon | return_ann | return_pct
+  model_type:             "lgbm"         # lgbm | catboost | rf
+  train_epsilon:          0.02
+
+  model_name:             "winner_classifier_v9"
+
+  # Cross-validation
+  oof_folds:              5
+  time_series:            1              # 1=TimeSeries, 0=Stratified, auto=detect
+
+  # Early stopping (gradient boosting only)
+  early_stopping_rounds:  100
+  valid_fraction:         0.1
+
+  # Sample weighting
+  use_weights:            1
+  weight_alpha:           0.08
+  weight_min:             0.5
+  weight_max:             10.0
+
+  # Missing value handling (1=median impute on train split; 0=drop rows)
+  impute_missing:         1
+
+  # Evaluation targets (comma-separated)
+  target_precision:       "0.88,0.92"
+  target_recall:          ""
+
+  # RF-specific (ignored for lgbm/catboost)
+  classifier_n_estimators: 400
+  class_weight:            "balanced_subsample"
+  max_depth:               ""
+  min_samples_leaf:        1
+  min_samples_split:       2
+
+  id_cols: "symbol,tradeTime,return_pct,return_mon,return_ann,daysToExpiration"
+  test_size:    0.3
+  random_state: 42
+
+# ============================================================
+# Winner Classifier scoring  (b02_score_winner)
+#
+# Template paths resolved from active_* variables.
+# ============================================================
+winnerscore:
+  score_input:      "output/data_labeled/labeled_trades_with_gex_macro_{active_score_dataset}.csv"
+  model_in:         "output/winner_train/v9_oof_{active_train_profile}/winner_classifier_model_{active_train_profile}_lgbm.pkl"
+  score_out_folder: "output/winner_score/v9_model_{active_train_profile}"
+  score_out:        "scores_winner_lgbm_{active_score_dataset}.csv"
+
+  proba_col: "win_proba"
+  pred_col:  "win_predict"
+
+  split_file: "winner_scores_split.csv"
+  oof_file:   ""
+
+  # Threshold selection
+  threshold:         ""      # fixed numeric override (empty = auto)
+  use_pack_best_f1:  1       # use best-F1 threshold from training pack
+  target_precision:  0.90    # if auto_calibrate=1, pick threshold ≥ this precision
+  target_recall:     ""
+  auto_calibrate:    1       # 1 = data-driven threshold (requires labels in scored CSV)
+
+# ============================================================
+# Tail Loss Model  (optional; staging/train_tail_with_gex.py)
+# ============================================================
+tail:
+  out_dir:           "output/tails_train/v6b_we"
+  model_out:         "tail_model_gex_v6b_ne_cut05.pkl"
+  imp_out:           "tail_gex_v6b_ne_cut05_feature_importances.csv"
+  scores_out:        "tail_gex_v6b_ne_cut05_scores_oof.csv"
+  metrics_out:       "tail_train_metrics_v6b_ne_cut05.json"
+  save_scores_sample: 40000
+  label_on:          "per_month"    # raw | annualized | per_month
+  pct:               0.05           # worst fraction by dollar PnL
+  cv_type:           "stratified"   # stratified | time
+  folds:             8
+  seed:              42
+  out_dir_general:   "output"
+
+tail_scoring:
+  score_input:    "output/labeled_trades_enriched2.csv"
+  score_out:      "output/tails_score/scored_with_tail_pct_mon_cut5_new.csv"
+  keep_proba_col: "tail_proba"
+  pred_col:       "is_tail_preda"
+  threshold:      0.030
+
+# ============================================================
+# Evaluation  (eval/eval_classifier.py)
+# ============================================================
+evaluation:
+  input:           "output/tails_score/scored_with_tail_pct_mon_cut5_new.csv"
+  output_dir:      "output/eval/tail_scored/"
+  proba_col:       "tail_proba"
+  fixed_thresholds: ""
+  target_recall:   "0.86,0.92"
+  label_mode:      "tail_pct"    # winner | tail_pct | tail_pnl | provided
+  tail_k:          0.05
+  label_col:       ""
+  return_col:      "return_mon"
+  split_col:       "is_train"
+  filter_query:    ""
+  group_cols:      "daysToExpiration"
+
+# ============================================================
+# General / shared settings
+# ============================================================
+general:
+  symbol_col:         "baseSymbol"
+  trade_date_col:     "trade_date"
+  drop_duplicates:    true
+  strict_length_check: true
+
+# ============================================================
+# Rescue model (experimental; staging/)
+# ============================================================
+rescue:
+  out: "output/rescue_tail/v2d"
+
+# ============================================================
+# Pipeline flags
+# ============================================================
+process_on_fly: 0
+write_sweep:    1
