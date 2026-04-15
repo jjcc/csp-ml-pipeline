@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service.constants import BASE_FEATS, NEW_FEATS
 from service.preprocess import add_dte_and_normalized_returns
-from service.env_config import getenv
+from service.env_config import getenv, config as _cfg_loader
 from service.utils import ensure_dir
 
 
@@ -99,11 +99,9 @@ class WinnerClassifierConfig:
         return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def _parse(self):
-        # I/O
-        self.output_dir = getenv("WINNER_OUTPUT_DIR")
-        labeled_dir     = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"),
-                                       getenv("COMMON_LABELED", "data_labeled"))
-        self.input_csv  = os.path.join(labeled_dir, getenv("COMMON_OUTPUT_CSV", ""))
+        # I/O — WINNER_INPUT is the fully-resolved path from config.yaml winner.input
+        self.input_csv  = getenv("WINNER_INPUT", "")
+        self.output_dir = getenv("WINNER_OUTPUT_DIR", "output/winner_train/")
         self.model_name = getenv("WINNER_MODEL_NAME", "winner_classifier_model")
 
         # Feature selection (subset of ALL_FEATS used by default)
@@ -143,7 +141,7 @@ class WinnerClassifierConfig:
         self.targets_precision = self._list_float(getenv("WINNER_TARGET_PRECISION", ""))
 
         if not self.input_csv or not self.output_dir:
-            raise SystemExit("WINNER_INPUT (or COMMON_OUTPUT_CSV) and WINNER_OUTPUT_DIR must be set.")
+            raise SystemExit("WINNER_INPUT and WINNER_OUTPUT_DIR must be set in config.yaml.")
 
 
 # ---------------------------------------------------------------------------
@@ -546,10 +544,11 @@ def main():
     df = pd.read_csv(cfg.input_csv)
     df = df.sort_values(["captureTime", "symbol"], kind="mergesort").reset_index(drop=True)
 
-    # Derive output directory tag from input file name
-    tag = Path(cfg.input_csv).stem.split("_")[-1]
-    cfg.output_dir = cfg.output_dir + tag
-    cfg.model_name = f"winner_classifier_model_{tag}"
+    # Use the score date (YYYYMMDD) as the model identifier — self-documenting and
+    # consistent with all other output filenames in the rolling-window pipeline.
+    score_date     = _cfg_loader.get_score_date()   # e.g. "20251027"
+    cfg.output_dir = cfg.output_dir.rstrip("/\\")   # already fully resolved by config template
+    cfg.model_name = f"winner_classifier_model_{score_date}"
     ensure_dir(cfg.output_dir)
 
     # Prepare data

@@ -63,20 +63,18 @@ def load_scoring_config() -> ScoringConfig:
     csv_in = getenv("WINNERSCORE_SCORE_INPUT", "./candidates.csv")
     gex_filter = str(getenv("GEX_FILTER", "0")).lower() in {"1", "true", "yes", "y", "on"}
 
-    use_other_model = False  # TODO: Make this configurable
-
-    if use_other_model:
-        model_in = getenv("WINNERSCORE_MODEL_IN", "./output_winner/model_pack.pkl")
-        model_type = ""
-    else:
-        model_type = getenv("WINNER_MODEL_TYPE", "lgbm").strip().lower()
-        model_in = os.path.join(
-            getenv("WINNER_OUTPUT_DIR", "output"),
-            f"{getenv('WINNER_MODEL_NAME')}_{model_type}.pkl"
+    # WINNERSCORE_MODEL_IN is fully resolved by config.yaml template substitution —
+    # it already contains the correct date-stamped path.  No path assembly needed here.
+    model_type = getenv("WINNER_MODEL_TYPE", "lgbm").strip().lower()
+    model_in   = getenv("WINNERSCORE_MODEL_IN", "")
+    if not model_in:
+        raise SystemExit(
+            "WINNERSCORE_MODEL_IN is not set.  "
+            "Ensure winnerscore.model_in is configured in config.yaml."
         )
 
     csv_out_dir = getenv("WINNERSCORE_SCORE_OUT_FOLDER", "output/winner_score/folder1")
-    csv_out = os.path.join(csv_out_dir, getenv("WINNERSCORE_SCORE_OUT", "scores_winner.csv"))
+    csv_out = os.path.join(csv_out_dir, getenv("WINNERSCORE_SCORE_OUT", "scores.csv"))
 
     fixed_thr = getenv("WINNERSCORE_THRESHOLD", "").strip()
     fixed_threshold = float(fixed_thr) if fixed_thr else None

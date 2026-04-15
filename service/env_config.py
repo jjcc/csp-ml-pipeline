@@ -5,22 +5,35 @@ Priority order:
   1. config.yaml (YAML file, section-flattened to UPPER_SNAKE keys)
   2. .env / OS environment variables
 
-Template placeholders in values (e.g. {active_train_profile}) are resolved
-against the top-level active_* keys in config.yaml.
+Template placeholders in path values are resolved automatically:
+
+  {active_score_dataset}    — tag of active_score_dataset (e.g. "f")
+  {active_process_dataset}  — tag of active_process_dataset (e.g. "f")
+  {active_score_date}       — events_start_date of active_score_dataset as YYYYMMDD
+                               (e.g. "20251027" for events_start_date: 2025-10-27)
+                               Used in all output filenames so they are self-documenting.
+  {active_score_labeled_csv}— output_csv filename of active_score_dataset
+                               (e.g. "labeled_trades_f_1027.csv")
+  {rolling_window_weeks}    — integer rolling window size from config
+  {model_type}              — winner.model_type (e.g. "lgbm")
 
 Usage
 -----
     from service.env_config import getenv, config
 
     # Simple key lookup
-    val = getenv("COMMON_OUTPUT_DIR", "./output")
+    val = getenv("ROLLING_WINDOW_WEEKS", "14")
 
     # Dataset-specific config for current active_process_dataset
     ds_cfg = config.get_active_dataset_config()
-    data_dir = ds_cfg["data_dir"]
+
+    # Rolling training batches for current active_score_dataset
+    batches = config.get_rolling_train_batches()   # list of config dicts
 """
 
 import os
+from datetime import datetime, timedelta
+
 import yaml
 from dotenv import load_dotenv
 
@@ -59,21 +72,54 @@ class ConfigLoader:
                 out[key.upper()] = str(v) if v is not None else ""
         return out
 
+    def _compute_score_date(self, raw: dict) -> str:
+        """Return events_start_date of active_score_dataset as YYYYMMDD string.
+
+        Falls back to the tag itself if the date cannot be found, so paths
+        degrade gracefully rather than crashing.
+        """
+        score_tag = str(raw.get("active_score_dataset", "")).strip()
+        for _key, cfg in raw.get("common_configs", {}).items():
+            if isinstance(cfg, dict):
+                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
+                    date_str = cfg.get("events_start_date", "")
+                    if date_str:
+                        return date_str.replace("-", "")
+        return score_tag  # fallback
+
+    def _compute_score_labeled_csv(self, raw: dict) -> str:
+        """Return the output_csv filename for active_score_dataset.
+
+        E.g. "labeled_trades_f_1027.csv"
+        """
+        score_tag = str(raw.get("active_score_dataset", "")).strip()
+        for _key, cfg in raw.get("common_configs", {}).items():
+            if isinstance(cfg, dict):
+                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
+                    return cfg.get("output_csv", "")
+        return ""
+
     def _ensure_loaded(self) -> None:
         if self._config is None:
             raw = self._load_yaml_raw()
             self._config = self._flatten(raw)
+            # Inject computed derived keys so templates can reference them
+            self._config["ACTIVE_SCORE_DATE"] = self._compute_score_date(raw)
+            self._config["ACTIVE_SCORE_LABELED_CSV"] = self._compute_score_labeled_csv(raw)
             if self.fallback_to_env:
                 load_dotenv(".env", override=False)
 
     def _resolve_template(self, value: str) -> str:
-        """Replace {variable} placeholders with resolved values from config."""
+        """Replace {variable} placeholders with resolved config values."""
         if not isinstance(value, str):
             return value
         placeholders = {
-            "{active_train_profile}":   self._config.get("ACTIVE_TRAIN_PROFILE", ""),
-            "{active_score_dataset}":   self._config.get("ACTIVE_SCORE_DATASET", ""),
-            "{active_process_dataset}": self._config.get("ACTIVE_PROCESS_DATASET", ""),
+            "{active_score_dataset}":    self._config.get("ACTIVE_SCORE_DATASET", ""),
+            "{active_process_dataset}":  self._config.get("ACTIVE_PROCESS_DATASET", ""),
+            "{active_score_date}":       self._config.get("ACTIVE_SCORE_DATE", ""),
+            "{active_score_labeled_csv}": self._config.get("ACTIVE_SCORE_LABELED_CSV", ""),
+            "{rolling_window_weeks}":    self._config.get("ROLLING_WINDOW_WEEKS", "14"),
+            "{model_type}":              self._config.get("WINNER_MODEL_TYPE", "lgbm"),
         }
         for ph, val in placeholders.items():
             if ph in value:
@@ -125,6 +171,74 @@ class ConfigLoader:
                     return cfg
 
         return {}
+
+    def get_score_dataset_config(self) -> dict:
+        """Return the dataset config dict for the current active_score_dataset."""
+        raw = self._load_yaml_raw()
+        score_tag = str(raw.get("active_score_dataset", "")).strip()
+        if not score_tag:
+            return {}
+
+        for _key, cfg in raw.get("common_configs", {}).items():
+            if isinstance(cfg, dict):
+                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
+                    return cfg
+        return {}
+
+    def get_score_date(self) -> str:
+        """Return events_start_date of active_score_dataset as YYYYMMDD (e.g. '20251027')."""
+        self._ensure_loaded()
+        return self._config.get("ACTIVE_SCORE_DATE", "")
+
+    def get_rolling_train_batches(self) -> list:
+        """Return the list of dataset configs that fall within the rolling training window.
+
+        Selection rules:
+          - Window end   = events_start_date of active_score_dataset
+          - Window start = window_end − rolling_window_weeks
+          - Included     = all batches whose events_start_date is in [window_start, window_end)
+          - The active_score_dataset itself is always excluded
+          - Result is sorted chronologically by events_start_date
+
+        Returns a list of raw config dicts (same structure as common_configs entries).
+        """
+        raw = self._load_yaml_raw()
+        score_tag    = str(raw.get("active_score_dataset", "")).strip()
+        window_weeks = int(raw.get("rolling_window_weeks", 14))
+
+        # Locate score dataset's start date
+        score_start: datetime | None = None
+        for _key, cfg in raw.get("common_configs", {}).items():
+            if isinstance(cfg, dict):
+                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
+                    try:
+                        score_start = datetime.fromisoformat(cfg["events_start_date"])
+                    except (KeyError, ValueError):
+                        pass
+                    break
+
+        if score_start is None:
+            return []
+
+        window_start = score_start - timedelta(weeks=window_weeks)
+
+        # Collect all batches whose start date falls in [window_start, score_start)
+        batches: list[tuple[datetime, dict]] = []
+        for _key, cfg in raw.get("common_configs", {}).items():
+            if not isinstance(cfg, dict):
+                continue
+            tag = _extract_dataset_tag(cfg.get("data_basic_csv", ""))
+            if tag == score_tag:
+                continue  # never include the score dataset in the training window
+            try:
+                batch_start = datetime.fromisoformat(cfg["events_start_date"])
+            except (KeyError, ValueError):
+                continue
+            if window_start <= batch_start < score_start:
+                batches.append((batch_start, cfg))
+
+        batches.sort(key=lambda x: x[0])
+        return [cfg for _, cfg in batches]
 
     def get_derived_file(self, basic_csv: str):
         """Derive macro_csv and output_csv from the basic_csv stem."""

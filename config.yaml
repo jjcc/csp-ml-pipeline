@@ -2,18 +2,25 @@
 # CSP ML Pipeline — Unified Configuration
 # ============================================================
 #
-# Change only these 3 lines to control the entire pipeline:
+# To add a new batch and run the full pipeline, change only these lines:
 #
-#   active_train_profile   — which merged dataset to train on
-#   active_score_dataset   — which dataset to score
-#   active_process_dataset — which dataset a01/a02/a03 should process
+#   active_score_dataset   — short tag for the batch you just finished labeling
+#                            (drives all output paths; the tag itself never appears
+#                             in filenames — dates are used instead)
+#   active_process_dataset — set to the same tag while running a01–a04
+#   rolling_window_weeks   — how many weeks of labeled history to train on
+#                            (14 = 7 × 2-week batches, matches original "orig" window)
 #
-# Valid dataset tags: orig, a, b, c, d, e, f  (add more in common_configs below)
+# Output paths are automatically dated from active_score_dataset's events_start_date.
+# Example: active_score_dataset="f" with events_start_date=2025-10-27 → all outputs
+# use the suffix "20251027" so filenames are self-documenting.
+#
+# See CLAUDE.md → "Rolling Window Design" for full workflow and naming convention.
 # ============================================================
 
-active_train_profile:   "origabcde"   # Training:   orig | origa | origab | … | origabcde
-active_score_dataset:   "f"           # Scoring:    a | b | c | d | e | f
-active_process_dataset: "f"           # Processing (a01/a02/a03): orig | a | b | … | f
+active_score_dataset:   "f"           # Tag of the most-recently labeled batch
+active_process_dataset: "f"           # Set this while running a01–a04 for a new batch
+rolling_window_weeks:   14            # Training window (~7 biweekly batches; try 16 for more data)
 
 # ============================================================
 # Dataset registry  (add a new block here when ingesting a new batch)
@@ -170,14 +177,16 @@ fundamentals:
 # Template paths — {active_train_profile} is resolved automatically.
 # ============================================================
 winner:
-  input:       "output/data_labeled/labeled_merged_with_gex_macro_{active_train_profile}.csv"
-  output_dir:  "output/winner_train/v9_oof_{active_train_profile}/"
+  # {active_score_date} resolves to events_start_date of active_score_dataset (YYYYMMDD)
+  # {rolling_window_weeks} resolves to the integer window size above
+  input:       "output/data_merged/merged_roll{rolling_window_weeks}w_{active_score_date}.csv"
+  output_dir:  "output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/"
 
   train_target:           "return_mon"   # return_mon | return_ann | return_pct
   model_type:             "lgbm"         # lgbm | catboost | rf
   train_epsilon:          0.02
 
-  model_name:             "winner_classifier_v9"
+  model_name:             "winner_classifier_model"   # suffix _{date}_{type}.pkl added by b01
 
   # Cross-validation
   oof_folds:              5
@@ -217,10 +226,12 @@ winner:
 # Template paths resolved from active_* variables.
 # ============================================================
 winnerscore:
-  score_input:      "output/data_labeled/labeled_trades_with_gex_macro_{active_score_dataset}.csv"
-  model_in:         "output/winner_train/v9_oof_{active_train_profile}/winner_classifier_model_{active_train_profile}_lgbm.pkl"
-  score_out_folder: "output/winner_score/v9_model_{active_train_profile}"
-  score_out:        "scores_winner_lgbm_{active_score_dataset}.csv"
+  # score_input: labeled CSV for the score batch  ({active_score_labeled_csv} resolves
+  #              to the output_csv field of active_score_dataset's config entry)
+  score_input:      "output/data_labeled/{active_score_labeled_csv}"
+  model_in:         "output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/winner_classifier_model_{active_score_date}_{model_type}.pkl"
+  score_out_folder: "output/winner_score/v9_roll{rolling_window_weeks}w_{active_score_date}"
+  score_out:        "scores_{active_score_date}.csv"
 
   proba_col: "win_proba"
   pred_col:  "win_predict"

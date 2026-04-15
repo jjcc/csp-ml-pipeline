@@ -11,14 +11,14 @@ Rewritten from `csp_feature_lab2/` for cleaner structure and maintainability.
 pip install -r requirements.txt
 ```
 
-Change 3 lines at the top of `config.yaml`, then run the pipeline in order:
+Change 2 lines at the top of `config.yaml`, then run the pipeline in order:
 
 ```bash
 python pipeline/a01_build_features.py   # build enriched dataset
 python pipeline/a02_collect_events.py   # collect corporate events
 python pipeline/a03_filter_trades.py    # filter trades near events
 python pipeline/a04_label_data.py       # label with win/loss outcomes
-python pipeline/a05_merge_datasets.py   # (optional) merge for walk-forward training
+python pipeline/a05_merge_datasets.py   # build rolling-window training set
 python pipeline/b01_train_winner.py     # train winner classifier
 python pipeline/b02_score_winner.py     # score new candidates
 pytest test/                            # run tests
@@ -28,26 +28,79 @@ pytest test/                            # run tests
 
 ## Configuration
 
-### The 3 active variables (top of config.yaml)
+### The 2 active variables (top of config.yaml)
 
 ```yaml
-active_train_profile:   "origabcde"   # which datasets to train on
-active_score_dataset:   "f"           # which dataset to score
-active_process_dataset: "f"           # which dataset a01/a02/a03 process
+active_score_dataset:   "f"   # short tag for the most-recently labeled batch
+active_process_dataset: "f"   # set to the same tag while running a01–a04
+rolling_window_weeks:   14    # how far back to look for training data
 ```
 
-All paths in `winner.*` and `winnerscore.*` use `{active_train_profile}` and
-`{active_score_dataset}` as template placeholders that are resolved automatically
-by `service/env_config.py`.
+`active_train_profile` is gone.  The training window is computed automatically
+by `a05_merge_datasets.py` from `rolling_window_weeks` and the batch registry.
 
-### Adding a new dataset batch
+### Adding a new batch — 6-step workflow
 
-1. Add an entry to `common_configs` in `config.yaml` following the template comment.
-2. Set `active_process_dataset` to the new tag.
-3. Run `a01 → a02 → a03 → a04` for the new batch.
-4. Run `a05` to create a new merged training file.
-5. Set `active_train_profile` to the cumulative tag (e.g. `"origabcdef"`).
-6. Run `b01` to retrain the model.
+```
+1. Add a new entry in common_configs (config.yaml) using the template at the bottom.
+2. Set active_process_dataset to the new tag.
+3. Run: a01 → a02 → a03 → a04   (processes + labels the new batch)
+4. Set active_score_dataset to the same tag.
+5. Run: a05                       (auto-selects the rolling training window)
+6. Run: b01 → b02                 (train + score)
+```
+
+That's it — no cumulative tags, no manual file naming.
+
+---
+
+## Rolling Window Design
+
+### Why rolling instead of expanding
+
+With 11+ months of history (26+ biweekly batches), an expanding window
+over-weights old market regimes (volatility environment, rates).  A fixed
+14-week window keeps the model anchored to recent conditions.
+
+### Window selection logic (`service/env_config.py :: get_rolling_train_batches`)
+
+```
+window_end   = events_start_date of active_score_dataset
+window_start = window_end − rolling_window_weeks
+
+included = batches where events_start_date ∈ [window_start, window_end)
+           sorted chronologically; active_score_dataset excluded
+```
+
+Changing `rolling_window_weeks` in config.yaml is the only knob needed.
+Try 16 weeks (~8 batches) if the model shows high variance.
+
+### Output file naming convention
+
+All output filenames are **date-stamped**, not tag-stamped.  The date used
+is the `events_start_date` of `active_score_dataset` formatted as `YYYYMMDD`.
+
+| File | Example (score dataset start = 2025-10-27) |
+|------|--------------------------------------------|
+| Merged training CSV | `output/data_merged/merged_roll14w_20251027.csv` |
+| Model directory | `output/winner_train/v9_roll14w_20251027/` |
+| Model file | `winner_classifier_model_20251027_lgbm.pkl` |
+| Score output | `output/winner_score/v9_roll14w_20251027/scores_20251027.csv` |
+
+The letter tags (`orig`, `a`, `b`, …) are **internal lookup keys only** — they
+appear in `config.yaml → common_configs` and nowhere in any output filename.
+They exist solely to let you reference a batch by a short name in the config.
+
+### Template placeholders (resolved by `service/env_config.py`)
+
+| Placeholder | Resolves to |
+|-------------|-------------|
+| `{active_score_dataset}` | tag string, e.g. `"f"` |
+| `{active_process_dataset}` | tag string, e.g. `"f"` |
+| `{active_score_date}` | `events_start_date` as YYYYMMDD, e.g. `"20251027"` |
+| `{active_score_labeled_csv}` | `output_csv` of the score dataset config entry |
+| `{rolling_window_weeks}` | integer window size, e.g. `"14"` |
+| `{model_type}` | `winner.model_type`, e.g. `"lgbm"` |
 
 ---
 
@@ -55,7 +108,7 @@ by `service/env_config.py`.
 
 ```
 csp_ml_rewrite/
-├── config.yaml                    ← main configuration (edit the 3 active_* lines)
+├── config.yaml                    ← main configuration (edit the 2 active_* lines + rolling_window_weeks)
 ├── corp_action_config.yaml        ← corporate-event filtering windows
 ├── requirements.txt
 │
@@ -134,6 +187,16 @@ All feature groups (`BASE_FEATS`, `GEX_FEATS`, `NEW_FEATS`) live in
 from each config's `data_basic_csv` field dynamically — no hard-coded
 `tag_to_key` mapping that needs manual updates.
 
+### Rolling window training (not expanding)
+`service/env_config.py::get_rolling_train_batches()` selects the last
+`rolling_window_weeks` weeks of labeled batches automatically.  No cumulative
+tags like `origabcde` — just set `rolling_window_weeks` and `active_score_dataset`.
+
+### Date-stamped outputs (not tag-stamped)
+All merged datasets, model directories, and score files use the
+`events_start_date` of the active score batch (YYYYMMDD) in their names.
+The short letter tags (`a`, `b`, …) never appear in output paths.
+
 ### Symbol exclusions from data files (not code)
 `pipeline/a04_label_data.py` loads exclusions from:
 - `data/missing_stocks.json` — symbols without price data
@@ -142,8 +205,9 @@ from each config's `data_basic_csv` field dynamically — no hard-coded
 Add problematic symbols to these JSON files instead of editing Python code.
 
 ### Config template resolution
-Paths like `"output/winner_train/v9_oof_{active_train_profile}"` are resolved by
-`service/env_config.py` whenever `getenv()` is called.
+Paths like `"output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/"` are
+resolved by `service/env_config.py` whenever `getenv()` is called.
+See "Rolling Window Design" section above for the full placeholder table.
 
 ---
 
