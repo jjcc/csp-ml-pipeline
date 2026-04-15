@@ -23,13 +23,13 @@ python pipeline/a04_label_data.py       # label with win/loss outcomes
 # --- Training dataset ---
 python pipeline/a05_merge_datasets.py   # build rolling-window training set
 
-# --- Winner classifier (which trades are likely profitable?) ---
+# --- Winner classifier  (run independently as needed) ---
 python pipeline/b01_train_winner.py     # train winner classifier
-python pipeline/b02_score_winner.py     # score new candidates
+python pipeline/b02_score_winner.py     # score: win_proba reference signal
 
-# --- Tail classifier (which trades are likely catastrophic losers?) ---
+# --- Tail classifier  (run independently as needed) ---
 python pipeline/b03_train_tail.py       # train tail-loss classifier
-python pipeline/b04_score_tail.py       # flag likely fat-tail losers
+python pipeline/b04_score_tail.py       # score: tail_proba reference signal
 
 pytest test/                            # run tests
 ```
@@ -191,11 +191,12 @@ output/winner_score/v9_roll{W}w_{YYYYMMDD}/          output/tails_score/v9_roll{
   scores_{YYYYMMDD}.csv                               tail_scores_{YYYYMMDD}.csv
 ```
 
-The two classifiers answer different questions on the same scored batch:
-- **Winner (b01/b02)**: `win_proba` — which trades are *likely profitable*?
-- **Tail (b03/b04)**: `tail_proba` — which trades are *likely catastrophic losers*?
+The two classifiers are **independent** — run either or both depending on what you need:
+- **Winner (b01/b02)**: produces `win_proba` — reference score for likely profitable trades
+- **Tail (b03/b04)**: produces `tail_proba` — reference score for likely catastrophic losses
 
-Practical trading filter: `win_predict == 1 AND is_tail_pred == 0`
+Both scores are inputs to your own decision process, not automated filters.
+See `INSTRUCTIONS.md` for how to read and optionally join the score files.
 
 ---
 

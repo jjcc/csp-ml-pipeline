@@ -1,11 +1,11 @@
 # CSP ML Pipeline — Operating Instructions
 
-This pipeline trains and applies two binary classifiers on Cash-Secured Put (CSP) option trades:
+This pipeline trains and applies two independent binary classifiers on Cash-Secured Put (CSP) option trades:
 
-- **Winner Classifier** — identifies trades *likely to be profitable*
-- **Tail Classifier** — identifies trades *likely to produce catastrophic losses*
+- **Winner Classifier** — scores how likely a trade is profitable (`win_proba`)
+- **Tail Classifier** — scores how likely a trade is a catastrophic loser (`tail_proba`)
 
-The practical trading filter is: `win_predict == 1 AND is_tail_pred == 0`
+Both classifiers produce **reference scores**, not final decisions. You decide how to interpret and combine them based on your own risk tolerance and market view. The two classifiers can be run independently — you do not need to run both.
 
 ---
 
@@ -114,7 +114,12 @@ output/data_merged/merged_roll14w_20251110.csv
 
 The console output shows which batches were selected and how many rows.
 
-### Step 6 — Train the Winner Classifier
+### Step 6 — Train and score (run whichever classifier(s) you need)
+
+The winner and tail classifiers are independent.  Run one, both, or neither
+depending on what reference signals you want for this batch.
+
+#### Winner Classifier
 
 ```bash
 python pipeline/b01_train_winner.py
@@ -134,7 +139,7 @@ output/winner_train/v9_roll14w_20251110/
 Key metric to check: **OOF AUC-ROC** and **OOF AUC-PRC** printed at the end.
 Acceptable ranges (rough): AUC-ROC > 0.60, AUC-PRC > 0.70.
 
-### Step 7 — Train the Tail Classifier
+#### Tail Classifier
 
 ```bash
 python pipeline/b03_train_tail.py
@@ -153,11 +158,11 @@ output/tails_train/v9_roll14w_20251110/
 Key metric: **OOF AUC-PRC** (precision-recall AUC is more informative than
 ROC-AUC for the imbalanced tail class).
 
-### Step 8 — Score batch "g"
+Then score the new batch with whichever model(s) you just trained:
 
 ```bash
-python pipeline/b02_score_winner.py    # winner probabilities
-python pipeline/b04_score_tail.py      # tail probabilities
+python pipeline/b02_score_winner.py    # win_proba reference scores
+python pipeline/b04_score_tail.py      # tail_proba reference scores
 ```
 
 Winner scores → `output/winner_score/v9_roll14w_20251110/scores_20251110.csv`
@@ -181,9 +186,9 @@ Tail scores   → `output/tails_score/v9_roll14w_20251110/tail_scores_20251110.c
 | `tail_proba` | Probability the trade is a catastrophic loser (0–1) |
 | `is_tail_pred` | 1 = predicted tail / avoid |
 
-### Combined filter
+### Using scores together (optional)
 
-To find trades that are predicted winners AND not predicted tails:
+If you want to look at both scores side by side, you can join the two output files on `symbol` + `tradeTime`:
 
 ```python
 import pandas as pd
@@ -191,19 +196,14 @@ import pandas as pd
 winner = pd.read_csv("output/winner_score/v9_roll14w_20251110/scores_20251110.csv")
 tail   = pd.read_csv("output/tails_score/v9_roll14w_20251110/tail_scores_20251110.csv")
 
-# Merge on trade identity
-merged = winner.merge(
+combined = winner.merge(
     tail[["symbol", "tradeTime", "tail_proba", "is_tail_pred"]],
     on=["symbol", "tradeTime"], how="left"
 )
-merged["is_tail_pred"] = merged["is_tail_pred"].fillna(0)
-
-candidates = merged[
-    (merged["win_predict"] == 1) &
-    (merged["is_tail_pred"] == 0)
-]
-print(f"{len(candidates)} candidates after dual-filter")
 ```
+
+`combined` then has both `win_proba` and `tail_proba` as reference columns.
+How you filter or rank the trades is entirely up to you.
 
 ---
 
