@@ -1,7 +1,6 @@
 import sys
-from pathlib import Path
+import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 from service.data_prepare import _load_symbol_prices, _save_cached_price_data
 from daily_stock_update import preload_prices_with_cache_by_time

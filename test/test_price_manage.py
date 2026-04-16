@@ -1,7 +1,6 @@
 import sys
-from pathlib import Path
+import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 from service.data_prepare import _load_cached_price_data
 from service.stock_data_manager2 import GroupedStockUpdater
