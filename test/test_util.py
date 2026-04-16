@@ -1,11 +1,12 @@
 import sys
+import unittest
+import joblib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 from service.utils import prep_tail_training_df, fill_features_with_training_medians
 from service.utils import ALL_FEATS
-from train_tail_with_gex import _fill_features
 
 class TestUtil(unittest.TestCase):
 
