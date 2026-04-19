@@ -35,51 +35,47 @@ ls gex101/       # should show dated CSV folders
 
 ## 2. Understanding `config.yaml`
 
-Only three lines at the top of `config.yaml` need to change as you work:
+One top-level knob controls training history depth:
 
 ```yaml
-active_score_dataset:   "f"   # tag of the batch you just finished labeling
-active_process_dataset: "f"   # set this while running a01–a04 for a new batch
-rolling_window_weeks:   14    # training window (14 weeks ≈ 7 biweekly batches)
+rolling_window_weeks: 14    # training window (14 weeks of labeled history)
 ```
 
-**All output paths are automatically dated** from the `events_start_date` of
-`active_score_dataset`.  For example, with `active_score_dataset: "f"` and
-`events_start_date: 2025-10-27`, every output uses the suffix `20251027`.
+When you have new option data, update three date fields in the `dataset:` block:
 
-You never need to type paths, dates, or cumulative tag strings like `origabcde`.
+```yaml
+dataset:
+  data_dir:           "option/put"    # all snapshot CSVs here, no sub-folders
+  cutoff_date:        "YYYY-MM-DD"    # ← last expiry in data + a few days buffer
+  events_start_date:  "YYYY-MM-DD"    # ← first trade date of scoring window
+  events_end_date:    "YYYY-MM-DD"    # ← last trade date of scoring window
+```
+
+**All output paths are automatically dated** from `dataset.events_start_date`.
+For example, with `events_start_date: 2025-10-27`, every output uses the suffix `20251027`.
+
+You never need to type paths or manage batch tag strings.
 
 ---
 
-## 3. Adding a New Batch (Full Workflow)
+## 3. Updating to New Data (Full Workflow)
 
-Do this every time you have a new 2-week block of option data ready.
+Do this every time you have new option snapshot data ready.
 
-### Step 1 — Register the batch in `config.yaml`
+### Step 1 — Drop new snapshots into `option/put/`
 
-Add an entry to `common_configs` following the template at the bottom of the
-`common_configs` section.  Fill in:
+No sub-folders, no date-separated directories.  All `coveredPut_*.csv` files
+go directly into `option/put/`.
 
-| Field | Example |
-|-------|---------|
-| `data_dir` | `"option/put/put25_1110-1121"` |
-| `data_basic_csv` | `"trades_raw_g_1110.csv"` |
-| `output_csv` | `"labeled_trades_g_1110.csv"` |
-| `cutoff_date` | `"2025-11-29"` (expiry date of last contract + buffer) |
-| `events_start_date` | `"2025-11-10"` |
-| `events_end_date` | `"2025-11-21"` |
-| `events_output` | `"output/data_prep/corp_events/events_g.csv"` |
-| `tickers_file` | `"output/data_prep/corp_events/symbols_in_option_data_g.txt"` |
-| `filtered_trades_csv` | `"option/put/filtered/trades_filtered_g.csv"` |
-| `filtered_out_csv` | `"option/put/filtered/trades_excluded_g.csv"` |
+### Step 2 — Update dates in `config.yaml`
 
-The tag (`g` here) is just an internal key.  It never appears in output filenames.
+Edit the `dataset:` block:
 
-### Step 2 — Set active_process_dataset
-
-```yaml
-active_process_dataset: "g"
-```
+| Field | Example | Meaning |
+|-------|---------|---------|
+| `cutoff_date` | `"2025-11-29"` | Last expiry date in the data + buffer |
+| `events_start_date` | `"2025-11-10"` | First trade date of the scoring window |
+| `events_end_date` | `"2025-11-21"` | Last trade date of the scoring window |
 
 ### Step 3 — Run data ingestion (a01 → a04)
 
@@ -90,31 +86,22 @@ python pipeline/a03_filter_trades.py    # drop trades within event windows
 python pipeline/a04_label_data.py       # fetch expiry prices, compute PnL, label win/loss
 ```
 
-Each step reads `active_process_dataset` from config and operates only on batch "g".
 Run them in order; each is a prerequisite for the next.
 
-### Step 4 — Set active_score_dataset
-
-```yaml
-active_score_dataset: "g"
-```
-
-This is the batch you will score with the newly trained models.
-
-### Step 5 — Build the rolling training set
+### Step 4 — Build the rolling training set
 
 ```bash
 python pipeline/a05_merge_datasets.py
 ```
 
-This selects the last `rolling_window_weeks` weeks of completed batches
-*before* batch "g", merges them, and writes:
+This date-filters the single labeled CSV to the rolling training window
+(`rolling_window_weeks` of history before `events_start_date`) and writes:
 
 ```
 output/data_merged/merged_roll14w_20251110.csv
 ```
 
-The console output shows which batches were selected and how many rows.
+The console output shows the window dates and how many rows were selected.
 
 ### Step 6 — Train and score
 

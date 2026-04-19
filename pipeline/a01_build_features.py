@@ -233,13 +233,11 @@ def main() -> None:
     dataset_cfg = config.get_active_dataset_config()
     if not dataset_cfg:
         raise SystemExit(
-            "No active dataset configuration found. "
-            "Set active_process_dataset in config.yaml (e.g., 'f', 'orig', 'a', …)"
+            "No dataset configuration found. "
+            "Add a `dataset:` block to config.yaml."
         )
 
-    active_dataset = config._load_yaml_raw().get("active_process_dataset", "")
-    print(f"[INFO] Processing dataset: {active_dataset}")
-    print(f"[INFO] Data directory:     {dataset_cfg.get('data_dir')}")
+    print(f"[INFO] Data directory: {dataset_cfg.get('data_dir')}")
 
     data_dir    = dataset_cfg.get("data_dir", "")
     basic_csv   = dataset_cfg.get("data_basic_csv", "trades_raw_orig.csv")
@@ -281,7 +279,7 @@ def main() -> None:
 
     # Write build log
     ts = pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = Path("log") / f"a01_build_log_{active_dataset}_{ts}.json"
+    log_path = Path("log") / f"a01_build_log_{ts}.json"
     log_path.parent.mkdir(exist_ok=True)
     with open(log_path, "w") as f:
         json.dump(out.report, f, indent=2)

@@ -42,30 +42,41 @@ See `INSTRUCTIONS.md` for the full end-to-end workflow with decision guidance.
 
 ## Configuration
 
-### The 2 active variables (top of config.yaml)
+### The only knob in config.yaml
 
 ```yaml
-active_score_dataset:   "f"   # short tag for the most-recently labeled batch
-active_process_dataset: "f"   # set to the same tag while running a01–a04
-rolling_window_weeks:   14    # how far back to look for training data
+rolling_window_weeks: 14   # how many weeks of labeled history to train on
 ```
 
-`active_train_profile` is gone.  The training window is computed automatically
-by `a05_merge_datasets.py` from `rolling_window_weeks` and the batch registry.
+When you have new option data, update three date fields in the `dataset:` block:
 
-### Adding a new batch — 6-step workflow
-
-```
-1. Add a new entry in common_configs (config.yaml) using the template at the bottom.
-2. Set active_process_dataset to the new tag.
-3. Run: a01 → a02 → a03 → a04   (processes + labels the new batch)
-4. Set active_score_dataset to the same tag.
-5. Run: a05                       (auto-selects the rolling training window)
-6. Run: b01 → b02                 (train 4-bin winner + score)
-   Optional: b03 → b04            (train tail veto + score; b03 REQUIRES b01's winner_scores_oof.csv)
+```yaml
+dataset:
+  data_dir:           "option/put"           # all snapshot CSVs here, no sub-folders
+  data_basic_csv:     "trades_raw_current.csv"
+  output_csv:         "labeled_trades_current.csv"
+  cutoff_date:        "YYYY-MM-DD"           # ← last expiry in data + buffer
+  events_start_date:  "YYYY-MM-DD"           # ← first trade date of scoring window
+  events_end_date:    "YYYY-MM-DD"           # ← last trade date of scoring window
+  ...
 ```
 
-That's it — no cumulative tags, no manual file naming.
+Output paths are automatically dated from `events_start_date` (YYYYMMDD suffix).
+Example: with `events_start_date: 2025-10-27`, every output uses `20251027`.
+
+### Updating to new data — 4-step workflow
+
+```
+1. Drop new snapshot CSVs into option/put/ (no sub-folders needed).
+2. Update the three date fields in config.yaml → dataset.
+3. Run: a01 → a02 → a03 → a04   (builds enriched + labeled dataset)
+4. Run: a05                       (date-filters rolling training window from labeled CSV)
+5. Run: b01 → b02                 (train 4-bin winner + score)
+   Optional: b03 → b04            (train tail veto + score)
+```
+
+The rolling window is applied by `a05_merge_datasets.py` by filtering the
+single labeled CSV on `tradeTime` rather than merging separate batch files.
 
 ---
 
@@ -73,47 +84,40 @@ That's it — no cumulative tags, no manual file naming.
 
 ### Why rolling instead of expanding
 
-With 11+ months of history (26+ biweekly batches), an expanding window
-over-weights old market regimes (volatility environment, rates).  A fixed
-14-week window keeps the model anchored to recent conditions.
+A fixed 14-week window keeps the model anchored to recent market conditions
+rather than over-weighting older volatility regimes.
 
-### Window selection logic (`service/env_config.py :: get_rolling_train_batches`)
+### Window selection logic (`a05_merge_datasets.py`)
 
 ```
-window_end   = events_start_date of active_score_dataset
+window_end   = dataset.events_start_date   (first day of the scoring period)
 window_start = window_end − rolling_window_weeks
 
-included = batches where events_start_date ∈ [window_start, window_end)
-           sorted chronologically; active_score_dataset excluded
+training rows = labeled CSV rows where:
+    window_start ≤ tradeTime < window_end
 ```
 
-Changing `rolling_window_weeks` in config.yaml is the only knob needed.
-Try 16 weeks (~8 batches) if the model shows high variance.
+All option data is in one labeled CSV; `a05` date-filters it rather than
+merging separate batch files.  Changing `rolling_window_weeks` is the only
+knob.  Try 16 weeks if the model shows high variance.
 
 ### Output file naming convention
 
-All output filenames are **date-stamped**, not tag-stamped.  The date used
-is the `events_start_date` of `active_score_dataset` formatted as `YYYYMMDD`.
+All output filenames are **date-stamped** from `dataset.events_start_date` (YYYYMMDD).
 
-| File | Example (score dataset start = 2025-10-27) |
-|------|--------------------------------------------|
+| File | Example (events_start_date = 2025-10-27) |
+|------|------------------------------------------|
 | Merged training CSV | `output/data_merged/merged_roll14w_20251027.csv` |
 | Model directory | `output/winner_train/v9_roll14w_20251027/` |
 | Model file | `winner_classifier_model_20251027_lgbm.pkl` |
 | Score output | `output/winner_score/v9_roll14w_20251027/scores_20251027.csv` |
 
-The letter tags (`orig`, `a`, `b`, …) are **internal lookup keys only** — they
-appear in `config.yaml → common_configs` and nowhere in any output filename.
-They exist solely to let you reference a batch by a short name in the config.
-
 ### Template placeholders (resolved by `service/env_config.py`)
 
 | Placeholder | Resolves to |
 |-------------|-------------|
-| `{active_score_dataset}` | tag string, e.g. `"f"` |
-| `{active_process_dataset}` | tag string, e.g. `"f"` |
-| `{active_score_date}` | `events_start_date` as YYYYMMDD, e.g. `"20251027"` |
-| `{active_score_labeled_csv}` | `output_csv` of the score dataset config entry |
+| `{active_score_date}` | `dataset.events_start_date` as YYYYMMDD, e.g. `"20251027"` |
+| `{active_score_labeled_csv}` | `dataset.output_csv`, e.g. `"labeled_trades_current.csv"` |
 | `{rolling_window_weeks}` | integer window size, e.g. `"14"` |
 | `{model_type}` | `winner.model_type`, e.g. `"lgbm"` |
 

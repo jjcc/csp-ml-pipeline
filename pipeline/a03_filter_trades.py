@@ -54,8 +54,8 @@ def load_config(config_path: str = "corp_action_config.yaml") -> FilterConfig:
 
     if not dataset_cfg:
         raise SystemExit(
-            "No active dataset configuration found. "
-            "Set active_process_dataset in config.yaml (e.g., 'f', 'orig', etc.)"
+            "No dataset configuration found. "
+            "Add a `dataset:` block to config.yaml."
         )
 
     # Parse exclusion windows from corp_action_config.yaml
