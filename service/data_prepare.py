@@ -37,6 +37,7 @@ def _load_cached_price_data(cache_dir, symbol, check_time = None):
 
 def _save_cached_price_data(cache_dir, symbol, price_df: pd.DataFrame):
     try:
+        os.makedirs(cache_dir, exist_ok=True)
         price_df.to_parquet(os.path.join(cache_dir, f"{symbol}.parquet"))
     except Exception as e:
         print(f"[WARN] cache write failed for {symbol}: {e}")

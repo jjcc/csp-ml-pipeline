@@ -15,6 +15,9 @@ import yaml
 import pandas as pd
 import numpy as np
 
+# Ensure project root is on path when run as a script
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 @dataclass
 class ExclusionWindow:

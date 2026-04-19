@@ -20,6 +20,9 @@ import requests
 import yaml
 import html
 
+# Ensure project root is on path when run as a script
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # Import split detector
 from service.split_detector import fetch_splits_yfinance
 
