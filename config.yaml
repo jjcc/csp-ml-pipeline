@@ -2,134 +2,36 @@
 # CSP ML Pipeline — Unified Configuration
 # ============================================================
 #
-# To add a new batch and run the full pipeline, change only these lines:
+# When you have new option data, update only these fields in the `dataset` block:
 #
-#   active_score_dataset   — short tag for the batch you just finished labeling
-#                            (drives all output paths; the tag itself never appears
-#                             in filenames — dates are used instead)
-#   active_process_dataset — set to the same tag while running a01–a04
-#   rolling_window_weeks   — how many weeks of labeled history to train on
-#                            (14 = 7 × 2-week batches, matches original "orig" window)
+#   dataset.cutoff_date       — last expiry date in the data + a few days buffer
+#                               (trades with expirationDate > cutoff are excluded as unlabeled)
+#   dataset.events_start_date — first trade date of the SCORING window
+#                               (also the rolling-window anchor: training = start_date − window)
+#   dataset.events_end_date   — last trade date of the scoring window
 #
-# Output paths are automatically dated from active_score_dataset's events_start_date.
-# Example: active_score_dataset="f" with events_start_date=2025-10-27 → all outputs
-# use the suffix "20251027" so filenames are self-documenting.
+# All output paths auto-date from events_start_date (YYYYMMDD suffix).
+# rolling_window_weeks controls how far back training data is drawn.
 #
-# See CLAUDE.md → "Rolling Window Design" for full workflow and naming convention.
+# See CLAUDE.md → "Rolling Window Design" for the full workflow.
 # ============================================================
 
-active_score_dataset:   "f"           # Tag of the most-recently labeled batch
-active_process_dataset: "f"           # Set this while running a01–a04 for a new batch
-rolling_window_weeks:   14            # Training window (~7 biweekly batches; try 16 for more data)
+rolling_window_weeks:   14            # Training window in weeks (try 16 for more data)
 
 # ============================================================
-# Dataset registry  (add a new block here when ingesting a new batch)
+# Single dataset — all option data in one folder, no sub-folders
 # ============================================================
-common_configs:
-
-  # ---- Original training set (Apr–Aug 2025) ----
-  original: &original_config
-    data_dir:             "option/put/unprocessed"
-    data_basic_csv:       "trades_raw_orig.csv"
-    output_csv:           "labeled_trades_with_gex_macro_orig.csv"
-    cutoff_date:          "2025-08-16"
-    events_start_date:    "2025-04-25"
-    events_end_date:      "2025-08-11"
-    events_output:        "output/data_prep/corp_events/events_orig.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_orig.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_orig.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_orig.csv"
-
-  # ---- Set A: Aug 11–29, 2025 ----
-  aug_11: &aug_11_config
-    data_dir:             "option/put/put25_0811-0829"
-    data_basic_csv:       "trades_raw_a_0811.csv"
-    output_csv:           "labeled_trades_a_0811.csv"
-    cutoff_date:          "2025-09-13"
-    events_start_date:    "2025-08-11"
-    events_end_date:      "2025-08-29"
-    events_output:        "output/data_prep/corp_events/events_a.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_a.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_a.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_a.csv"
-
-  # ---- Set B: Sep 1–12, 2025 ----
-  sep_1: &sep_1_config
-    data_dir:             "option/put/put25_0901-0912"
-    data_basic_csv:       "trades_raw_b_0901.csv"
-    output_csv:           "labeled_trades_b_0901.csv"
-    cutoff_date:          "2025-09-20"
-    events_start_date:    "2025-09-01"
-    events_end_date:      "2025-09-12"
-    events_output:        "output/data_prep/corp_events/events_b.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_b.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_b.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_b.csv"
-
-  # ---- Set C: Sep 15–26, 2025 ----
-  sep_15: &sep_15_config
-    data_dir:             "option/put/put25_0915-0926"
-    data_basic_csv:       "trades_raw_c_0915.csv"
-    output_csv:           "labeled_trades_c_0915.csv"
-    cutoff_date:          "2025-10-04"
-    events_start_date:    "2025-09-15"
-    events_end_date:      "2025-09-26"
-    events_output:        "output/data_prep/corp_events/events_c.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_c.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_c.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_c.csv"
-
-  # ---- Set D: Sep 29 – Oct 10, 2025 ----
-  sep_29: &sep_29_config
-    data_dir:             "option/put/put25_0929-1010"
-    data_basic_csv:       "trades_raw_d_0929.csv"
-    output_csv:           "labeled_trades_d_0929.csv"
-    cutoff_date:          "2025-10-18"
-    events_start_date:    "2025-09-29"
-    events_end_date:      "2025-10-10"
-    events_output:        "output/data_prep/corp_events/events_d.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_d.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_d.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_d.csv"
-
-  # ---- Set E: Oct 13–24, 2025 ----
-  oct_13: &oct_13_config
-    data_dir:             "option/put/put25_1013-1024"
-    data_basic_csv:       "trades_raw_e_1013.csv"
-    output_csv:           "labeled_trades_e_1013.csv"
-    cutoff_date:          "2025-11-01"
-    events_start_date:    "2025-10-13"
-    events_end_date:      "2025-10-24"
-    events_output:        "output/data_prep/corp_events/events_e.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_e.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_e.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_e.csv"
-
-  # ---- Set F: Oct 27 – Nov 7, 2025 ----
-  oct_27: &oct_27_config
-    data_dir:             "option/put/put25_1027-1107"
-    data_basic_csv:       "trades_raw_f_1027.csv"
-    output_csv:           "labeled_trades_f_1027.csv"
-    cutoff_date:          "2025-11-15"
-    events_start_date:    "2025-10-27"
-    events_end_date:      "2025-11-07"
-    events_output:        "output/data_prep/corp_events/events_f.csv"
-    tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_f.txt"
-    filtered_trades_csv:  "option/put/filtered/trades_filtered_f.csv"
-    filtered_out_csv:     "option/put/filtered/trades_excluded_f.csv"
-
-  # ---- Template: copy + rename when adding a new batch ----
-  # new_batch: &new_batch_config
-  #   data_dir:             "option/put/put25_MMDD-MMDD"
-  #   data_basic_csv:       "trades_raw_g_MMDD.csv"
-  #   output_csv:           "labeled_trades_g_MMDD.csv"
-  #   cutoff_date:          "YYYY-MM-DD"
-  #   events_start_date:    "YYYY-MM-DD"
-  #   events_end_date:      "YYYY-MM-DD"
-  #   events_output:        "output/data_prep/corp_events/events_g.csv"
-  #   tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_g.txt"
-  #   filtered_trades_csv:  "option/put/filtered/trades_filtered_g.csv"
-  #   filtered_out_csv:     "option/put/filtered/trades_excluded_g.csv"
+dataset:
+  data_dir:             "option/put"              # all raw snapshot CSVs live here
+  data_basic_csv:       "trades_raw_current.csv"  # intermediate raw merge written by a01
+  output_csv:           "labeled_trades_current.csv"  # labeled output written by a04
+  cutoff_date:          "2025-11-15"              # ← update when you have new data
+  events_start_date:    "2025-10-27"              # ← update: first day of scoring window
+  events_end_date:      "2025-11-07"              # ← update: last day of scoring window
+  events_output:        "output/data_prep/corp_events/events_current.csv"
+  tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_current.txt"
+  filtered_trades_csv:  "option/put/filtered/trades_filtered_current.csv"
+  filtered_out_csv:     "option/put/filtered/trades_excluded_current.csv"
 
 # ============================================================
 # Output directory layout
@@ -185,6 +87,14 @@ winner:
   train_target:           "return_mon"   # return_mon | return_ann | return_pct
   model_type:             "lgbm"         # lgbm | catboost | rf
   train_epsilon:          0.02
+
+  # Label mode: bins4 (default) trains a 4-class multiclass classifier (bin 0=worst, 3=best).
+  # Use "binary" only for comparison experiments.
+  label_mode:             "bins4"        # bins4 (default) | binary
+  bins_mode:              "per_day"      # per_day (quartiles within each trade date) | global
+  bins_q:                 "[0.25,0.5,0.75]"   # 3 cut-points → 4 bins
+  bins_min_group:         20             # min trades per day to compute stable quartiles
+  time_col:               "captureTime"  # column used for per_day grouping
 
   model_name:             "winner_classifier_model"   # suffix _{date}_{type}.pkl added by b01
 
@@ -249,23 +159,23 @@ winnerscore:
 # ============================================================
 # Tail Loss Classifier training  (b03_train_tail.py)
 #
-# Uses the same rolling-window merged CSV as b01 (output of a05).
-# Template paths resolved from active_score_date and rolling_window_weeks.
+# DEPENDENCY: b01_train_winner.py must run first.
+# b03 loads winner_scores_oof.csv (bins4 format) from the winner output directory
+# and uses the 4-bin OOF probabilities (p_bin0-3) as features.
+#
+# Labeling: tail = 1 when y_true == 0 (actual return in worst quartile / bin-0).
+# CV: reuses the winner fold structure (same fold column from winner_scores_oof.csv).
 # ============================================================
 tail:
-  # Shared with winner — both train on the same rolling-window dataset
+  # Same rolling-window dataset as b01
   input:       "output/data_merged/merged_roll{rolling_window_weeks}w_{active_score_date}.csv"
   output_dir:  "output/tails_train/v9_roll{rolling_window_weeks}w_{active_score_date}/"
 
-  model_name:        "tail_classifier_model"   # suffix _{date}.pkl added by b03
-  model_type:        "gbm"         # gbm (GradientBoosting) | lgbm
-  label_on:          "return_mon"  # return_mon | return_ann | return_pct | return_per_day
-  pct:               0.05          # worst fraction to label as tail (5%)
-  cv_type:           "stratified"  # stratified | time
-  folds:             8
-  seed:              42
-  with_earnings:     1             # 1 = include is_earnings_week / is_earnings_window if present
-  save_scores_sample: 40000
+  # Path to the winner OOF scores file produced by b01 (bins4 format required)
+  winner_oof_csv: "output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/winner_scores_oof.csv"
+
+  model_name:    "tail_classifier_model"   # suffix _{date}.pkl added by b03
+  with_earnings: 1    # 1 = include is_earnings_week / is_earnings_window if present
 
 # ============================================================
 # Tail Loss Classifier scoring  (b04_score_tail.py)
@@ -274,7 +184,10 @@ tail:
 # ============================================================
 tailscoring:
   score_input:      "output/data_labeled/{active_score_labeled_csv}"
+  # Tail model: produced by b03
   model_in:         "output/tails_train/v9_roll{rolling_window_weeks}w_{active_score_date}/tail_classifier_model_{active_score_date}.pkl"
+  # Winner model: required to compute p_bin0-3 features before tail scoring
+  winner_model_in:  "output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/winner_classifier_model_{active_score_date}_{model_type}.pkl"
   score_out_folder: "output/tails_score/v9_roll{rolling_window_weeks}w_{active_score_date}"
   score_out:        "tail_scores_{active_score_date}.csv"
   proba_col:        "tail_proba"
@@ -309,12 +222,6 @@ general:
   trade_date_col:     "trade_date"
   drop_duplicates:    true
   strict_length_check: true
-
-# ============================================================
-# Rescue model (experimental; staging/)
-# ============================================================
-rescue:
-  out: "output/rescue_tail/v2d"
 
 # ============================================================
 # Pipeline flags

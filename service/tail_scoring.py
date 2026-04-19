@@ -4,23 +4,23 @@ tail_scoring.py — Shared library for tail-loss classifier operations.
 Provides model loading, scoring, threshold selection, and metrics for the
 tail classifier pipeline (b03_train_tail / b04_score_tail).
 
-The tail classifier identifies the worst-K% of CSP trades by monthly return —
-contracts that are likely to produce catastrophic losses.  High tail_proba
-means "likely a fat-tail loser"; filter these out before trading.
+The tail classifier is a VETO LAYER that runs AFTER the 4-bin winner
+classifier.  It identifies "toxic" trades — those the winner model predicted
+as top-bin (bin-3) but that actually fall in the worst bin (bin-0).
+
+High tail_proba means "likely a catastrophic loser — avoid this trade."
 
 Model pack structure (joblib dict)
 ------------------------------------
-  model              — fitted classifier (GradientBoosting or LightGBM)
-  features           — list[str] feature names used at training time
+  model              — fitted LightGBM classifier
+  calibrator         — IsotonicRegression calibrator (applied after model.predict_proba)
+  features           — list[str] feature names (base features + BIN_PROB_FEATS)
   medians            — dict[str, float] training medians for imputation
-  tail_pct           — float, fraction used to define tail (e.g. 0.05)
-  label_on           — str, return column used for labeling (e.g. "return_mon")
-  tail_cut_value     — float, the quantile threshold that was applied
   oof_best_threshold — float, best-F1 threshold from OOF cross-validation
   oof_auc            — float
   oof_avg_precision  — float
-  cv                 — str, CV type used ("stratified" or "time")
-  folds              — int
+  tail_rate          — float, fraction of training data labeled as tail (bin-0)
+  contamination_rate — float, fraction of pred-bin3 trades that were actually bin-0
 """
 
 from __future__ import annotations
@@ -48,17 +48,15 @@ from sklearn.metrics import (
 @dataclass
 class TailModelPack:
     """Typed wrapper around the raw joblib dict."""
-    model: object
-    features: list
-    medians: dict
-    tail_pct: float
-    label_on: str
-    tail_cut_value: float
-    oof_best_threshold: float
+    model: object                          # LightGBM classifier
+    features: list                         # feature names (base + bin probs)
+    medians: dict                          # training medians for imputation
+    oof_best_threshold: float              # best-F1 threshold from OOF CV
+    calibrator: object = None             # IsotonicRegression (optional)
     oof_auc: float = float("nan")
     oof_avg_precision: float = float("nan")
-    cv: str = "stratified"
-    folds: int = 8
+    tail_rate: float = float("nan")        # fraction of training data that is tail
+    contamination_rate: float = float("nan")  # pred-bin3 trades actually bin-0
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +68,7 @@ def load_tail_model(path: str) -> TailModelPack:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Tail model pack not found: {path}")
     raw = joblib.load(path)
-    required = {"model", "features", "medians", "tail_pct", "label_on",
-                "tail_cut_value", "oof_best_threshold"}
+    required = {"model", "features", "medians", "oof_best_threshold"}
     missing = required - set(raw.keys())
     if missing:
         raise ValueError(f"Tail model pack is missing keys: {missing}")
@@ -79,14 +76,12 @@ def load_tail_model(path: str) -> TailModelPack:
         model=raw["model"],
         features=raw["features"],
         medians=raw["medians"],
-        tail_pct=raw["tail_pct"],
-        label_on=raw["label_on"],
-        tail_cut_value=raw["tail_cut_value"],
         oof_best_threshold=raw["oof_best_threshold"],
+        calibrator=raw.get("calibrator"),
         oof_auc=raw.get("oof_auc", float("nan")),
         oof_avg_precision=raw.get("oof_avg_precision", float("nan")),
-        cv=raw.get("cv", "stratified"),
-        folds=raw.get("folds", 8),
+        tail_rate=raw.get("tail_rate", float("nan")),
+        contamination_rate=raw.get("contamination_rate", float("nan")),
     )
 
 
@@ -94,17 +89,15 @@ def save_tail_model(pack: TailModelPack, path: str) -> None:
     """Save a TailModelPack to *path* as a joblib file."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     joblib.dump({
-        "model":              pack.model,
-        "features":           pack.features,
-        "medians":            pack.medians,
-        "tail_pct":           pack.tail_pct,
-        "label_on":           pack.label_on,
-        "tail_cut_value":     pack.tail_cut_value,
-        "oof_best_threshold": pack.oof_best_threshold,
-        "oof_auc":            pack.oof_auc,
-        "oof_avg_precision":  pack.oof_avg_precision,
-        "cv":                 pack.cv,
-        "folds":              pack.folds,
+        "model":               pack.model,
+        "calibrator":          pack.calibrator,
+        "features":            pack.features,
+        "medians":             pack.medians,
+        "oof_best_threshold":  pack.oof_best_threshold,
+        "oof_auc":             pack.oof_auc,
+        "oof_avg_precision":   pack.oof_avg_precision,
+        "tail_rate":           pack.tail_rate,
+        "contamination_rate":  pack.contamination_rate,
     }, path)
 
 
@@ -148,27 +141,24 @@ def fill_features(df: pd.DataFrame, feat_list: list,
 # Labeling
 # ---------------------------------------------------------------------------
 
-def build_tail_labels(df: pd.DataFrame, label_on: str, tail_pct: float
-                      ) -> tuple[np.ndarray, float]:
-    """Label the worst tail_pct fraction of trades as 1 (tail loss).
+def build_tail_labels_from_bins(df: pd.DataFrame) -> np.ndarray:
+    """Label tail trades using the 4-bin winner OOF output.
+
+    A trade is labeled as tail (1) when y_true == 0 (i.e., the actual return
+    fell in the worst quartile / bin-0 of the 4-bin winner model).
 
     Args:
-        df:       DataFrame with return columns
-        label_on: Column to rank by ("return_mon", "return_ann", "return_pct",
-                  "return_per_day")
-        tail_pct: Fraction to label as tail (e.g. 0.05 for worst 5%)
+        df: DataFrame containing a 'y_true' column (from winner_scores_oof.csv)
 
     Returns:
-        (y, tail_cut_value) where y is int array of 0/1 labels
+        y — int array of 0/1 tail labels
     """
-    if label_on not in df.columns:
+    if "y_true" not in df.columns:
         raise ValueError(
-            f"Column '{label_on}' not found.  Available: {list(df.columns)}"
+            "'y_true' column not found. Ensure winner_scores_oof.csv (bins4 format) "
+            "has been merged into df before calling build_tail_labels_from_bins()."
         )
-    target = df[label_on]
-    tail_cut = float(target.quantile(tail_pct))
-    y = (target <= tail_cut).astype(int).values
-    return y, tail_cut
+    return (df["y_true"] == 0).astype(int).values
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +167,61 @@ def build_tail_labels(df: pd.DataFrame, label_on: str, tail_pct: float
 
 def score_tail_data(df: pd.DataFrame, pack: TailModelPack,
                     proba_col: str = "tail_proba") -> tuple[pd.DataFrame, np.ndarray]:
-    """Score df with the tail model.  Returns (out_df, proba_array)."""
+    """Score df with the tail model.  Returns (out_df, proba_array).
+
+    If pack.calibrator is present (IsotonicRegression), the raw model
+    probabilities are calibrated before returning.
+    """
     X, _ = fill_features(df, pack.features, medians=pack.medians)
     proba = pack.model.predict_proba(X)[:, 1]
+    if pack.calibrator is not None:
+        proba = pack.calibrator.transform(proba)
     out = df.copy()
     out[proba_col] = proba
     return out, proba
+
+
+def add_bin_prob_features(df: pd.DataFrame, winner_model_pack: dict) -> pd.DataFrame:
+    """Apply a 4-bin winner model to df and add p_bin0-3 + conflict_score columns.
+
+    Called by b04_score_tail when scoring new (unlabeled) trades that don't
+    already have winner OOF probability columns.
+
+    Args:
+        df:               Input trades DataFrame (must have all winner features)
+        winner_model_pack: Dict loaded from winner model pkl (binary-mode pack
+                          is rejected; must be a bins4 final-model pack that
+                          supports predict_proba returning shape (N, 4))
+
+    Returns:
+        df copy with p_bin0, p_bin1, p_bin2, p_bin3, conflict_score added.
+    """
+    model   = winner_model_pack["model"]
+    features = winner_model_pack["features"]
+    medians  = winner_model_pack.get("medians", {})
+
+    Xdf = df.copy()
+    for col in features:
+        if col not in Xdf.columns:
+            Xdf[col] = np.nan
+        med = float(medians.get(col, 0.0))
+        Xdf[col] = pd.to_numeric(Xdf[col], errors="coerce").fillna(med)
+
+    X = Xdf[features].astype(float).values
+    proba = model.predict_proba(X)   # shape (N, 4) for bins4 model
+    if proba.shape[1] != 4:
+        raise ValueError(
+            f"Winner model returned {proba.shape[1]} classes — expected 4. "
+            "Ensure b01 was trained with WINNER_LABEL_MODE=bins4."
+        )
+
+    out = df.copy()
+    out["p_bin0"] = proba[:, 0]
+    out["p_bin1"] = proba[:, 1]
+    out["p_bin2"] = proba[:, 2]
+    out["p_bin3"] = proba[:, 3]
+    out["conflict_score"] = proba[:, 0] * proba[:, 3]
+    return out
 
 
 def apply_tail_threshold(df: pd.DataFrame, proba_col: str,

@@ -3,11 +3,7 @@
 a04_label_data.py — Step 4: Label option trades with win/loss outcomes.
 
 Fetches expiry-date closing prices via yfinance (with caching), computes PnL
-and return metrics, and writes labeled CSV files ready for model training.
-
-Two labeling modes (controlled by `merge_mode` flag at bottom of file):
-  - Single-dataset mode (default): labels each individual enriched dataset
-  - Merge mode: labels combined (merged) datasets in output/data_merged/
+and return metrics, and writes a labeled CSV ready for model training.
 
 Symbol exclusions are loaded from data files:
   - data/missing_stocks.json  — symbols with no price data (auto-managed)
@@ -17,8 +13,8 @@ Usage:
     python pipeline/a04_label_data.py
 
 Configuration:
-    Reads from config.yaml and .env.  The cutoff date for each dataset tag is
-    derived automatically from common_configs in config.yaml.
+    Reads from the single `dataset:` block in config.yaml.
+    cutoff_date and output_csv come from that block.
 """
 
 from __future__ import annotations
@@ -27,7 +23,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -172,6 +168,50 @@ def build_labeled_dataset(raw: pd.DataFrame, preload_closes: dict = None) -> pd.
                                 np.nan)
     df["won"] = df["total_pnl"] > 0
 
+    # ------------------------------------------------------------------
+    # Normalised return metrics (matches a09label_data.py in csp_feature_lab2)
+    # These are also computed by service/preprocess.py::add_dte_and_normalized_returns()
+    # at training time, but including them here makes the labeled CSV self-contained
+    # for diagnostics and for the tail classifier OOF output (which logs return_mon).
+    # IMPORTANT: return_mon must use the same column as WINNER_TRAIN_TARGET (default "return_mon").
+    # ------------------------------------------------------------------
+    dte = pd.to_numeric(df.get("daysToExpiration", pd.Series(1, index=df.index)),
+                        errors="coerce").replace(0, 1)
+    df["return_per_day"] = df["return_pct"] / dte
+    df["return_ann"]     = df["return_pct"] * 365.0 / dte
+    df["return_mon"]     = df["return_pct"] * 30.0  / dte  # primary training target
+
+    # ------------------------------------------------------------------
+    # Pre-compute 4-bin per-day quartile labels (cross-sectional ranking)
+    # Bins are computed from return_mon to match WINNER_TRAIN_TARGET.
+    # This mirrors the assign_bins() logic in csp_feature_lab2/a09label_data.py
+    # (bins4_quick_fixes.md §Issue 1: label/target alignment).
+    # Note: b01_train_winner.py recomputes bins dynamically via build_label_bins4();
+    # y_bin here is purely for analysis / early diagnostics.
+    # ------------------------------------------------------------------
+    df["_trade_date"] = pd.to_datetime(df["tradeTime"], errors="coerce").dt.tz_localize(None).dt.normalize()
+
+    def _assign_bins(g: pd.DataFrame) -> pd.DataFrame:
+        s = g["return_mon"]
+        if s.notna().sum() < 20:
+            g["y_bin"] = np.nan
+            return g
+        q25, q50, q75 = s.quantile([0.25, 0.50, 0.75]).values
+
+        def _to_bin(x):
+            if not np.isfinite(x):
+                return np.nan
+            if x <= q25: return 0
+            if x <= q50: return 1
+            if x <= q75: return 2
+            return 3
+
+        g["y_bin"] = s.apply(_to_bin)
+        return g
+
+    df = df.groupby("_trade_date", group_keys=False).apply(_assign_bins)
+    df.drop(columns=["_trade_date"], inplace=True, errors="ignore")
+
     return df
 
 
@@ -194,55 +234,6 @@ def load_exclude_symbols() -> set:
             excluded.update(data if isinstance(data, list) else data.keys())
 
     return excluded
-
-
-# ---------------------------------------------------------------------------
-# Dataset tag + cutoff helpers
-# ---------------------------------------------------------------------------
-
-def get_cutoff_dates() -> Dict[str, str]:
-    """Return {dataset_tag: cutoff_date} from common_configs in config.yaml."""
-    from service.env_config import config
-
-    cutoff_by_tag: Dict[str, str] = {}
-    for _key, cfg in config.get_common_configs_raw().items():
-        if not isinstance(cfg, dict):
-            continue
-        basic_csv = cfg.get("data_basic_csv", "")
-        stem      = basic_csv.replace(".csv", "")
-        parts     = stem.split("_")
-        try:
-            tag = parts[parts.index("raw") + 1]
-        except (ValueError, IndexError):
-            continue
-        cutoff = cfg.get("cutoff_date")
-        if cutoff:
-            cutoff_by_tag[tag] = cutoff
-
-    return cutoff_by_tag
-
-
-def extract_tag_from_filename(fname: str, merged: bool = False) -> str:
-    """Derive dataset tag from an enriched/merged filename.
-
-    Non-merged filenames look like: trades_with_gex_macro_<tag>_<date>.csv
-    Merged filenames look like:     merged_with_gex_macro_<combo>.csv
-                                    e.g. merged_with_gex_macro_origabcde.csv  → 'e'
-    """
-    stem  = Path(fname).stem
-    parts = stem.split("_")
-
-    if not merged:
-        # e.g. trades_with_gex_macro_f_1027  → tag at index after 'macro'
-        try:
-            idx = parts.index("macro")
-            return parts[idx + 1]
-        except (ValueError, IndexError):
-            return ""
-    else:
-        # last segment is the profile combo, last char is the tag (or 'orig')
-        combo = parts[-1]
-        return "orig" if combo == "orig" else combo[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -294,84 +285,67 @@ def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Multi-dataset labeling: single (non-merged)
+# Single-dataset labeling
 # ---------------------------------------------------------------------------
 
-def label_multiple_single_datasets() -> None:
-    """Label all individual enriched datasets found in output/data_prep/."""
-    input_dir  = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
-    cutoff_map = get_cutoff_dates()
-    exclude    = load_exclude_symbols()
+def label_single_dataset() -> None:
+    """Label the enriched dataset produced by a01_build_features.py.
 
-    files = sorted(f for f in os.listdir(input_dir)
-                   if f.startswith("trades_with_gex") and f.endswith(".csv"))
+    Reads the enriched CSV (output/data_prep/<macro_csv>) derived from
+    dataset.data_basic_csv in config.yaml, applies exclusions and cutoff,
+    fetches expiry prices, computes PnL/returns, and writes the labeled CSV to
+    output/data_labeled/<dataset.output_csv>.
+    """
+    from service.env_config import config, get_derived_file
 
-    if not files:
-        print(f"[WARN] No enriched trade files found in {input_dir}")
-        return
+    ds_cfg     = config.get_active_dataset_config()
+    if not ds_cfg:
+        raise SystemExit(
+            "No dataset configuration found. "
+            "Add a `dataset:` block to config.yaml."
+        )
 
-    for fname in files:
-        fpath = os.path.join(input_dir, fname)
-        print(f"\nProcessing: {fname}")
-        df = pd.read_csv(fpath, index_col="row_id")
+    basic_csv   = ds_cfg.get("data_basic_csv", "")
+    cutoff_date = ds_cfg.get("cutoff_date")
+    output_csv  = ds_cfg.get("output_csv", "")
 
-        # Apply exclusions from data files (no hard-coded lists)
-        before = len(df)
-        df = df[~df["baseSymbol"].isin(exclude)].copy()
-        if len(df) != before:
-            print(f"  Excluded {before - len(df)} rows from known bad symbols.")
+    if not cutoff_date:
+        raise SystemExit("dataset.cutoff_date is not set in config.yaml.")
+    if not output_csv:
+        raise SystemExit("dataset.output_csv is not set in config.yaml.")
 
-        tag         = extract_tag_from_filename(fname, merged=False)
-        cutoff_date = cutoff_map.get(tag)
-        if cutoff_date is None:
-            print(f"  [WARN] No cutoff date for tag '{tag}' — skipping.")
-            continue
+    macro_csv, _ = get_derived_file(basic_csv)
+    if not macro_csv:
+        raise SystemExit(f"Cannot derive enriched CSV name from data_basic_csv={basic_csv!r}")
 
-        output_csv = f"labeled_{fname}_filtered.csv"
-        label_csv_file(df, output_csv, cutoff_date)
+    input_dir = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
+    fpath     = os.path.join(input_dir, macro_csv)
 
+    if not os.path.isfile(fpath):
+        raise SystemExit(
+            f"Enriched CSV not found: {fpath}\n"
+            f"  Run a01_build_features.py first."
+        )
 
-# ---------------------------------------------------------------------------
-# Multi-dataset labeling: merged
-# ---------------------------------------------------------------------------
+    print(f"\nProcessing: {macro_csv}")
+    df      = pd.read_csv(fpath, index_col="row_id")
+    exclude = load_exclude_symbols()
 
-def label_merged_datasets() -> None:
-    """Label all merged datasets found in output/data_merged/."""
-    input_dir  = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_merged")
-    cutoff_map = get_cutoff_dates()
+    before = len(df)
+    df = df[~df["baseSymbol"].isin(exclude)].copy()
+    if len(df) != before:
+        print(f"  Excluded {before - len(df)} rows from known bad symbols.")
 
-    if not os.path.isdir(input_dir):
-        print(f"[WARN] Merged input directory not found: {input_dir}")
-        return
-
-    files = sorted(f for f in os.listdir(input_dir) if f.endswith(".csv"))
-    for fname in files:
-        fpath = os.path.join(input_dir, fname)
-        print(f"\nProcessing merged: {fname}")
-        df = pd.read_csv(fpath, index_col="row_id")
-
-        tag         = extract_tag_from_filename(fname, merged=True)
-        cutoff_date = cutoff_map.get(tag)
-        if cutoff_date is None:
-            print(f"  [WARN] No cutoff date for tag '{tag}' — skipping.")
-            continue
-
-        output_csv = f"labeled_{fname}"
-        label_csv_file(df, output_csv, cutoff_date)
+    label_csv_file(df, output_csv, cutoff_date)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(merge_mode: bool = False) -> None:
-    if merge_mode:
-        label_merged_datasets()
-    else:
-        label_multiple_single_datasets()
+def main() -> None:
+    label_single_dataset()
 
 
 if __name__ == "__main__":
-    # Change to True to label merged (walk-forward training) datasets
-    merge_mode = False
-    main(merge_mode=merge_mode)
+    main()

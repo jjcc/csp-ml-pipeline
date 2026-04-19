@@ -1,56 +1,58 @@
 #!/usr/bin/env python3
 """
-b03_train_tail.py — Train the Tail-Loss Classifier with OOF cross-validation.
+b03_train_tail.py — Train the Tail-Loss Classifier (Veto Layer).
 
-Trains a binary classifier to identify the worst-K% of CSP trades by monthly
-return — contracts that are likely to produce catastrophic losses ("fat tails").
-High tail_proba ≈ likely loser; filter these out before entering a trade.
+The tail classifier is a VETO LAYER that runs AFTER the 4-bin winner classifier.
+It identifies "toxic" trades — those the winner model predicted as top-bin (bin-3)
+but that actually fall in the worst bin (bin-0).
 
-Training input:  same rolling-window merged CSV as b01 (output of a05)
-Labeling:        worst `tail.pct` fraction of trades by `tail.label_on` return
-Model:           GradientBoostingClassifier (sklearn) — robust on small datasets
-                 or LightGBM (lgbm) for larger windows
-CV:              StratifiedKFold (default) or TimeSeriesSplit
+Architecture dependency:
+  b01_train_winner.py must run FIRST and produce winner_scores_oof.csv with the
+  4-bin OOF output (columns: row_idx, y_true, y_pred, p_bin0-3, fold, has_oof).
+  The tail classifier reuses the same fold structure and uses the per-class
+  probabilities (p_bin0-3) as features alongside the standard market features.
 
-Outputs (in tail.output_dir from config.yaml):
-  tail_classifier_model_{date}.pkl   — model pack (model + features + medians + metrics)
-  tail_scores_oof.csv                — out-of-fold probability scores (sampled)
-  tail_classifier_metrics.json       — AUC-ROC, AUC-PR, best-F1 threshold, etc.
-  tail_feature_importances.csv       — mean feature importances across folds
+Labeling:
+  tail = 1  when  y_true == 0  (actual return fell in worst quartile / bin-0)
+  This targets catastrophic losers regardless of what the winner model predicted.
 
-Configuration comes from config.yaml (tail.*) or .env (TAIL_* prefixed variables).
+High tail_proba => "likely a catastrophic loser — do not enter this trade."
 
 Usage:
     python pipeline/b03_train_tail.py
+
+Outputs (in tail.output_dir from config.yaml):
+  tail_classifier_model_{date}.pkl   — TailModelPack (model + calibrator + features + medians)
+  tail_scores_oof.csv                — out-of-fold tail probability scores
+  tail_classifier_metrics.json       — OOF AUC-ROC, AUC-PRC, threshold, contamination stats
+  tail_feature_importances.csv       — feature importances from final model
+
+Configuration comes from config.yaml (tail.*) or .env (TAIL_* prefixed variables).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import (
-    average_precision_score,
-    precision_recall_curve,
-    roc_auc_score,
-)
-from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit
+from lightgbm import LGBMClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from service.constants import TAIL_FEATS, TAIL_EARNINGS_FEATS
+from service.constants import BIN_PROB_FEATS, TAIL_FEATS, TAIL_EARNINGS_FEATS
 from service.env_config import getenv, config as _cfg_loader
-from service.preprocess import add_dte_and_normalized_returns
 from service.tail_scoring import (
-    TailModelPack, build_tail_labels, fill_features, save_tail_model,
+    TailModelPack,
+    fill_features,
+    save_tail_model,
     write_tail_metrics,
 )
-from service.utils import ensure_dir, prep_tail_training_df
+from service.utils import ensure_dir
 
 
 # ---------------------------------------------------------------------------
@@ -61,92 +63,109 @@ class TailClassifierConfig:
     """Parse all training parameters from config.yaml / .env."""
 
     def __init__(self):
-        self.input_csv  = getenv("TAIL_INPUT", "")
-        self.output_dir = getenv("TAIL_OUTPUT_DIR", "output/tails_train/")
-        self.model_name = getenv("TAIL_MODEL_NAME", "tail_classifier_model")
+        # Path to winner_scores_oof.csv (bins4 format with p_bin0-3 columns)
+        self.winner_oof_csv = getenv("TAIL_WINNER_OOF_CSV", "").strip()
+        # Labeled trades CSV (same rolling-window input as b01)
+        self.input_csv  = getenv("TAIL_INPUT", "").strip()
+        self.output_dir = getenv("TAIL_OUTPUT_DIR", "output/tails_train/").strip()
+        self.model_name = getenv("TAIL_MODEL_NAME", "tail_classifier_model").strip()
 
-        self.tail_pct   = float(getenv("TAIL_PCT",    "0.05"))
-        self.label_on   = getenv("TAIL_LABEL_ON",     "return_mon").strip()
-        self.cv_type    = getenv("TAIL_CV_TYPE",       "stratified").strip().lower()
-        self.folds      = int(getenv("TAIL_FOLDS",    "8"))
-        self.seed       = int(getenv("TAIL_SEED",     "42"))
-        self.model_type = getenv("TAIL_MODEL_TYPE",   "gbm").strip().lower()
         self.with_earnings = str(getenv("TAIL_WITH_EARNINGS", "1")).lower() in {
             "1", "true", "yes", "y", "on"
         }
-        self.save_oof_sample = int(getenv("TAIL_SAVE_SCORES_SAMPLE", "40000"))
 
+        if not self.winner_oof_csv:
+            raise SystemExit(
+                "TAIL_WINNER_OOF_CSV must be set in config.yaml (tail.winner_oof_csv).\n"
+                "Run b01_train_winner.py first to generate winner_scores_oof.csv."
+            )
         if not self.input_csv:
-            raise SystemExit("TAIL_INPUT must be set in config.yaml.")
-        if not self.output_dir:
-            raise SystemExit("TAIL_OUTPUT_DIR must be set in config.yaml.")
+            raise SystemExit("TAIL_INPUT must be set in config.yaml (tail.input).")
 
 
 # ---------------------------------------------------------------------------
-# Model factory
+# Data loading
 # ---------------------------------------------------------------------------
 
-def build_model(cfg: TailClassifierConfig):
-    """Return an untrained classifier based on cfg.model_type."""
-    if cfg.model_type == "lgbm":
-        try:
-            from lightgbm import LGBMClassifier
-        except ImportError:
-            raise SystemExit("LightGBM not installed.  Run: pip install lightgbm")
-        return LGBMClassifier(
-            n_estimators=500,
-            learning_rate=0.05,
-            num_leaves=31,
-            random_state=cfg.seed,
-            n_jobs=-1,
-            verbose=-1,
+_BINS4_OOF_REQUIRED = {"row_idx", "y_true", "y_pred",
+                        "p_bin0", "p_bin1", "p_bin2", "p_bin3",
+                        "fold", "has_oof"}
+
+
+def load_and_merge(cfg: TailClassifierConfig) -> pd.DataFrame:
+    """Load winner OOF scores + labeled trades and merge on row_idx.
+
+    Returns a DataFrame with all trade features plus the winner OOF columns,
+    filtered to rows that have valid OOF predictions (has_oof == 1).
+    """
+    print(f"[INFO] Loading winner OOF scores: {cfg.winner_oof_csv}")
+    if not os.path.isfile(cfg.winner_oof_csv):
+        raise FileNotFoundError(
+            f"Winner OOF file not found: {cfg.winner_oof_csv}\n"
+            "Run b01_train_winner.py first."
         )
-    else:  # default: gradient boosting
-        return GradientBoostingClassifier(random_state=cfg.seed)
+    scores = pd.read_csv(cfg.winner_oof_csv)
 
-
-# ---------------------------------------------------------------------------
-# OOF cross-validation
-# ---------------------------------------------------------------------------
-
-def run_oof(X: np.ndarray, y: np.ndarray, cfg: TailClassifierConfig,
-            feat_list: list) -> tuple[np.ndarray, np.ndarray]:
-    """Run OOF cross-validation.  Returns (oof_proba, mean_importances)."""
-    if cfg.cv_type == "time":
-        splitter = TimeSeriesSplit(n_splits=cfg.folds)
-        splits = list(splitter.split(X))
-    else:
-        splitter = StratifiedKFold(n_splits=cfg.folds, shuffle=True,
-                                   random_state=cfg.seed)
-        splits = list(splitter.split(X, y))
-
-    oof = np.zeros(len(y), dtype=float)
-    importances = np.zeros(len(feat_list), dtype=float)
-    n_valid = 0
-
-    for tr_idx, va_idx in splits:
-        Xtr, ytr = X[tr_idx], y[tr_idx]
-        Xva, yva = X[va_idx], y[va_idx]
-
-        if len(np.unique(ytr)) < 2 or len(np.unique(yva)) < 2:
-            print(f"  [WARN] Fold skipped — degenerate label split")
-            continue
-
-        clf = build_model(cfg)
-        clf.fit(Xtr, ytr)
-        oof[va_idx] = clf.predict_proba(Xva)[:, 1]
-        if hasattr(clf, "feature_importances_"):
-            importances += clf.feature_importances_
-        n_valid += 1
-
-    if n_valid == 0:
-        raise SystemExit(
-            "All OOF folds were degenerate.  "
-            f"Increase tail.pct (currently {cfg.tail_pct:.3f}) or use more data."
+    missing_cols = _BINS4_OOF_REQUIRED - set(scores.columns)
+    if missing_cols:
+        raise ValueError(
+            f"winner_scores_oof.csv is missing columns: {missing_cols}\n"
+            "Ensure b01 was trained with WINNER_LABEL_MODE=bins4."
         )
 
-    importances /= n_valid
-    return oof, importances
+    print(f"[INFO] Loading labeled trades: {cfg.input_csv}")
+    trades = pd.read_csv(cfg.input_csv)
+
+    oof_cols = ["row_idx", "y_true", "y_pred",
+                "p_bin0", "p_bin1", "p_bin2", "p_bin3",
+                "fold", "has_oof"]
+    df = trades.merge(
+        scores[oof_cols],
+        left_index=True,
+        right_on="row_idx",
+        how="inner",
+    )
+
+    # Keep only rows with valid OOF predictions
+    df = df[df["has_oof"] == 1].copy()
+    print(f"[INFO] Merged trades with valid OOF: {len(df):,}")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Feature preparation
+# ---------------------------------------------------------------------------
+
+def build_features(df: pd.DataFrame,
+                   with_earnings: bool) -> tuple[list, pd.DataFrame]:
+    """Assemble feature list and add derived features.
+
+    The tail classifier uses:
+      - TAIL_FEATS   — market / greeks features
+      - BIN_PROB_FEATS — p_bin0-3 from winner OOF + conflict_score
+      - TAIL_EARNINGS_FEATS (optional)
+
+    Returns (feat_list, df_with_conflict_score).
+    """
+    df = df.copy()
+    # conflict_score = high when winner model is simultaneously uncertain
+    # between best (bin-3) and worst (bin-0) — key tail signal
+    df["conflict_score"] = df["p_bin0"] * df["p_bin3"]
+
+    feat_list = list(TAIL_FEATS) + list(BIN_PROB_FEATS)
+
+    if with_earnings:
+        earnings_present = [f for f in TAIL_EARNINGS_FEATS if f in df.columns]
+        feat_list += earnings_present
+        if earnings_present:
+            print(f"[INFO] Including earnings features: {earnings_present}")
+
+    # Warn about any features the model expects but the data doesn't have
+    missing = [f for f in feat_list if f not in df.columns]
+    if missing:
+        print(f"[WARN] Features missing from data (will impute with median): {missing}")
+
+    return feat_list, df
 
 
 # ---------------------------------------------------------------------------
@@ -164,128 +183,220 @@ def find_best_f1_threshold(y: np.ndarray, proba: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
+# OOF cross-validation (reuse winner fold structure)
+# ---------------------------------------------------------------------------
+
+def run_oof(df: pd.DataFrame, X: np.ndarray,
+            y: np.ndarray) -> tuple[np.ndarray, list]:
+    """Run OOF CV by reusing the winner model's fold column.
+
+    Returns (oof_proba_array, fold_metrics_list).
+    """
+    oof = np.zeros(len(df), dtype=float)
+    fold_metrics = []
+
+    for fold in sorted(df["fold"].unique()):
+        if fold == -1:
+            continue
+
+        train_mask = (df["fold"] != fold).values
+        val_mask   = (df["fold"] == fold).values
+
+        X_train, y_train = X[train_mask], y[train_mask]
+        X_val,   y_val   = X[val_mask],   y[val_mask]
+
+        if len(np.unique(y_train)) < 2:
+            print(f"  [WARN] Fold {fold}: degenerate label split — skipped")
+            continue
+
+        pos = y_train.sum()
+        neg = len(y_train) - pos
+        scale_pos_weight = neg / max(pos, 1)
+
+        print(f"  Fold {fold}: {len(y_train):,} train "
+              f"({y_train.mean():.1%} tail) | "
+              f"{len(y_val):,} val ({y_val.mean():.1%} tail) | "
+              f"scale_pos_weight={scale_pos_weight:.2f}")
+
+        clf = LGBMClassifier(
+            n_estimators=2000,
+            learning_rate=0.02,
+            num_leaves=64,
+            max_depth=-1,
+            min_child_samples=50,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=3.0,
+            reg_alpha=1.0,
+            scale_pos_weight=scale_pos_weight,
+            random_state=42 + int(fold),
+            verbose=-1,
+            n_jobs=-1,
+        )
+        clf.fit(X_train, y_train)
+        oof[val_mask] = clf.predict_proba(X_val)[:, 1]
+
+        if len(np.unique(y_val)) > 1:
+            fold_auc = roc_auc_score(y_val, oof[val_mask])
+            fold_ap  = average_precision_score(y_val, oof[val_mask])
+            print(f"         ROC-AUC={fold_auc:.4f}  PR-AUC={fold_ap:.4f}")
+            fold_metrics.append({"fold": int(fold),
+                                  "auc": float(fold_auc),
+                                  "pr_auc": float(fold_ap)})
+
+    return oof, fold_metrics
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     cfg = TailClassifierConfig()
 
-    # --- Load and prep data ---
-    print(f"[INFO] Loading training data from {cfg.input_csv}")
-    df = pd.read_csv(cfg.input_csv)
-    df = prep_tail_training_df(df).dropna(subset=["total_pnl"])
-    df = add_dte_and_normalized_returns(df)
-    df = df.sort_values("tradeTime").reset_index(drop=True)
-    print(f"[INFO] {len(df):,} rows after prep")
+    # ── Load and merge winner OOF with labeled trades ────────────────────────
+    df = load_and_merge(cfg)
 
-    # --- Feature list ---
-    feat_list = list(TAIL_FEATS)
-    if cfg.with_earnings:
-        earnings_present = [f for f in TAIL_EARNINGS_FEATS if f in df.columns]
-        feat_list += earnings_present
-        if earnings_present:
-            print(f"[INFO] Including earnings features: {earnings_present}")
+    # ── Feature prep (adds conflict_score, extends with earnings if needed) ──
+    feat_list, df = build_features(df, cfg.with_earnings)
 
-    # --- Build X and labels ---
-    X, medians = fill_features(df, feat_list)
-    y, tail_cut = build_tail_labels(df, cfg.label_on, cfg.tail_pct)
+    # ── Tail labels: y_true == 0  (actual worst quartile / bin-0) ───────────
+    y = (df["y_true"] == 0).astype(int).values
+    tail_n    = int(y.sum())
+    total_n   = len(y)
+    tail_rate = float(y.mean())
+    print(f"\n[INFO] Tail labels: {tail_n}/{total_n} ({tail_rate:.1%} tail)")
 
-    print(f"[INFO] Labeling: {cfg.label_on} ≤ {tail_cut:.4f} "
-          f"→ {y.sum()} tails out of {len(y)} ({y.mean()*100:.1f}%)")
+    # ── Toxic trade analysis (pred=bin-3 but true=bin-0) ─────────────────────
+    mask_pred3 = df["y_pred"] == 3
+    mask_toxic = (df["y_pred"] == 3) & (df["y_true"] == 0)
+    n_pred3    = int(mask_pred3.sum())
+    n_toxic    = int(mask_toxic.sum())
+    contamination = n_toxic / max(n_pred3, 1)
+    print(f"[INFO] Toxic trades: {n_toxic}/{n_pred3} predicted-bin3 "
+          f"are actually bin-0 ({contamination:.1%} contamination rate)")
 
-    if y.sum() < max(5, cfg.folds):
+    if tail_n < 10:
         raise SystemExit(
-            f"Not enough tail examples ({y.sum()}) for {cfg.folds} folds.  "
-            f"Increase tail.pct or use more training data."
+            f"Too few tail examples ({tail_n}).  "
+            "Increase rolling_window_weeks or check winner_scores_oof.csv."
         )
 
-    # --- OOF cross-validation ---
-    print(f"[INFO] OOF CV: {cfg.cv_type}, {cfg.folds} folds, model={cfg.model_type}")
-    t0 = pd.Timestamp.now()
-    oof_proba, importances = run_oof(X, y, cfg, feat_list)
-    elapsed = (pd.Timestamp.now() - t0).total_seconds()
-    print(f"[INFO] OOF done in {elapsed:.1f}s")
+    # ── Build feature matrix ─────────────────────────────────────────────────
+    print(f"\n[INFO] Building feature matrix: {len(feat_list)} features")
+    X, medians = fill_features(df, feat_list)
 
-    # --- OOF metrics ---
-    oof_auc = roc_auc_score(y, oof_proba) if len(np.unique(y)) > 1 else float("nan")
-    oof_ap  = average_precision_score(y, oof_proba) if len(np.unique(y)) > 1 else float("nan")
-    best_thr = find_best_f1_threshold(y, oof_proba)
-    print(f"[INFO] OOF  AUC-ROC={oof_auc:.4f}  AUC-PRC={oof_ap:.4f}  "
-          f"best_threshold≈{best_thr:.4f}")
+    # ── OOF cross-validation (reuse winner fold structure) ───────────────────
+    print(f"\n[INFO] OOF CV (reusing winner fold structure)…")
+    oof_proba, fold_metrics = run_oof(df, X, y)
 
-    # --- Final model fit on all data ---
-    clf_final = build_model(cfg)
-    clf_final.fit(X, y)
+    valid_mask = oof_proba > 0
+    if valid_mask.sum() > 0 and len(np.unique(y[valid_mask])) > 1:
+        oof_auc = roc_auc_score(y[valid_mask], oof_proba[valid_mask])
+        oof_ap  = average_precision_score(y[valid_mask], oof_proba[valid_mask])
+        best_thr = find_best_f1_threshold(y[valid_mask], oof_proba[valid_mask])
+    else:
+        oof_auc  = float("nan")
+        oof_ap   = float("nan")
+        best_thr = 0.5
 
-    # --- Output directory and model identifier ---
-    score_date = _cfg_loader.get_score_date()   # e.g. "20251027"
+    print(f"\n[INFO] OOF: AUC-ROC={oof_auc:.4f}  AUC-PRC={oof_ap:.4f}  "
+          f"best_threshold={best_thr:.4f}")
+
+    # ── Isotonic calibration on OOF probabilities ────────────────────────────
+    print(f"[INFO] Calibrating OOF probabilities (IsotonicRegression)…")
+    cal = IsotonicRegression(out_of_bounds="clip")
+    cal.fit(oof_proba[valid_mask], y[valid_mask])
+
+    # ── Final model: train on all data ───────────────────────────────────────
+    print(f"\n[INFO] Training final model on all {total_n:,} trades…")
+    pos = y.sum()
+    neg = total_n - pos
+    final_model = LGBMClassifier(
+        n_estimators=2000,
+        learning_rate=0.02,
+        num_leaves=64,
+        max_depth=-1,
+        min_child_samples=50,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_lambda=3.0,
+        reg_alpha=1.0,
+        scale_pos_weight=neg / max(pos, 1),
+        random_state=42,
+        verbose=-1,
+        n_jobs=-1,
+    )
+    final_model.fit(X, y)
+
+    # ── Output directory ─────────────────────────────────────────────────────
+    score_date = _cfg_loader.get_score_date()
     out_dir = cfg.output_dir.rstrip("/\\")
     ensure_dir(out_dir)
-    model_fname = f"{cfg.model_name}_{score_date}.pkl"
-    model_path  = os.path.join(out_dir, model_fname)
 
-    # --- Save model pack ---
+    # ── Save TailModelPack ───────────────────────────────────────────────────
     pack = TailModelPack(
-        model=clf_final,
+        model=final_model,
+        calibrator=cal,
         features=feat_list,
         medians=medians,
-        tail_pct=cfg.tail_pct,
-        label_on=cfg.label_on,
-        tail_cut_value=tail_cut,
         oof_best_threshold=best_thr,
         oof_auc=oof_auc,
         oof_avg_precision=oof_ap,
-        cv=cfg.cv_type,
-        folds=cfg.folds,
+        tail_rate=tail_rate,
+        contamination_rate=contamination,
     )
+    model_fname = f"{cfg.model_name}_{score_date}.pkl"
+    model_path  = os.path.join(out_dir, model_fname)
     save_tail_model(pack, model_path)
     print(f"[INFO] Model pack → {model_path}")
 
-    # --- Feature importances ---
+    # ── Feature importances ──────────────────────────────────────────────────
     imp_path = os.path.join(out_dir, "tail_feature_importances.csv")
-    pd.DataFrame({"feature": feat_list, "importance": importances}) \
-        .sort_values("importance", ascending=False) \
-        .to_csv(imp_path, index=False)
+    pd.DataFrame({
+        "feature":    feat_list,
+        "importance": final_model.feature_importances_,
+    }).sort_values("importance", ascending=False).to_csv(imp_path, index=False)
     print(f"[INFO] Feature importances → {imp_path}")
 
-    # --- OOF scores (sampled) ---
-    if cfg.save_oof_sample > 0:
-        oof_cols = ["baseSymbol", "tradeTime", "expirationDate", "strike",
-                    "potentialReturnAnnual", "total_pnl",
-                    "return_pct", "return_mon", "return_ann", "daysToExpiration",
-                    "VIX", "impliedVolatilityRank1y",
-                    "gex_gamma_at_ul", "gex_total_abs", "gex_neg", "gex_missing",
-                    "prev_close_minus_ul_pct", "log1p_DTE"]
-        have = [c for c in oof_cols if c in df.columns]
-        oof_df = df[have].copy()
-        oof_df["tail_proba_oof"] = oof_proba
-        oof_df["is_tail"] = y
-        if len(oof_df) > cfg.save_oof_sample:
-            oof_df = oof_df.sample(cfg.save_oof_sample,
-                                   random_state=cfg.seed).sort_values("tradeTime")
-        oof_path = os.path.join(out_dir, "tail_scores_oof.csv")
-        oof_df.to_csv(oof_path, index=False)
-        print(f"[INFO] OOF scores → {oof_path}")
+    # ── OOF scores CSV ───────────────────────────────────────────────────────
+    id_cols = ["baseSymbol", "tradeTime", "expirationDate", "strike",
+               "potentialReturnAnnual", "return_mon", "daysToExpiration",
+               "VIX", "impliedVolatilityRank1y"]
+    have = [c for c in id_cols if c in df.columns]
+    oof_df = df[have].copy()
+    oof_df["row_idx"]        = df["row_idx"].values
+    oof_df["fold"]           = df["fold"].values
+    oof_df["y_true_bin"]     = df["y_true"].values    # 0-3 from winner bins4
+    oof_df["y_pred_bin"]     = df["y_pred"].values
+    oof_df["is_tail"]        = y
+    oof_df["tail_proba_oof"] = oof_proba
+    oof_df["tail_proba_cal"] = cal.transform(oof_proba)
+    oof_df["is_toxic"]       = mask_toxic.values
 
-    # --- Metrics JSON ---
+    oof_path = os.path.join(out_dir, "tail_scores_oof.csv")
+    oof_df.to_csv(oof_path, index=False)
+    print(f"[INFO] OOF scores → {oof_path}")
+
+    # ── Metrics JSON ─────────────────────────────────────────────────────────
     write_tail_metrics(out_dir, {"auc_roc": oof_auc, "auc_prc": oof_ap}, extra={
-        "rows":            int(len(df)),
-        "tails":           int(y.sum()),
-        "tail_pct":        float(cfg.tail_pct),
-        "label_on":        cfg.label_on,
-        "tail_cut_value":  float(tail_cut),
-        "oof_best_threshold": float(best_thr),
-        "cv":              cfg.cv_type,
-        "folds":           cfg.folds,
-        "model_type":      cfg.model_type,
-        "model_path":      model_path,
+        "rows":               total_n,
+        "tail_n":             tail_n,
+        "tail_rate":          round(tail_rate, 4),
+        "oof_best_threshold": round(best_thr, 6),
+        "contamination_rate": round(contamination, 4),
+        "toxic_n":            n_toxic,
+        "pred_bin3_n":        n_pred3,
+        "fold_metrics":       fold_metrics,
+        "model_path":         model_path,
+        "winner_oof_csv":     cfg.winner_oof_csv,
     })
 
     print(f"\n✅  Tail classifier trained.")
     print(f"   ROC AUC (OOF)={oof_auc:.4f}   PR AUC (OOF)={oof_ap:.4f}")
-    print(f"   Tail fraction={cfg.tail_pct:.3f}  label={cfg.label_on}  "
-          f"cut={tail_cut:.4f}")
+    print(f"   Tail rate={tail_rate:.1%}  Contamination={contamination:.1%}")
     print(f"   Outputs → {out_dir}/")
+    print(f"\n   Next: python pipeline/b04_score_tail.py")
 
 
 if __name__ == "__main__":

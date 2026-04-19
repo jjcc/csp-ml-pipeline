@@ -140,6 +140,20 @@ class WinnerClassifierConfig:
         self.targets_recall    = self._list_float(getenv("WINNER_TARGET_RECALL",    ""))
         self.targets_precision = self._list_float(getenv("WINNER_TARGET_PRECISION", ""))
 
+        # --- 4-bin classification (default mode) ---
+        # bins4: labels trades into 4 return quartiles (0=worst, 3=best)
+        # binary: original win/loss binary label (return_mon > epsilon)
+        self.label_mode      = getenv("WINNER_LABEL_MODE", "bins4").strip().lower()
+        self.bins_mode       = getenv("WINNER_BINS_MODE",  "per_day").strip().lower()
+        raw_q = getenv("WINNER_BINS_Q", "[0.25,0.5,0.75]").strip()
+        try:
+            import json as _json
+            self.bins_q = [float(x) for x in _json.loads(raw_q)]
+        except Exception:
+            self.bins_q = [float(x.strip()) for x in raw_q.strip("[]").split(",") if x.strip()]
+        self.bins_min_group  = int(getenv("WINNER_BINS_MIN_GROUP", "20"))
+        self.time_col        = getenv("WINNER_TIME_COL", "captureTime").strip()
+
         if not self.input_csv or not self.output_dir:
             raise SystemExit("WINNER_INPUT and WINNER_OUTPUT_DIR must be set in config.yaml.")
 
@@ -167,6 +181,65 @@ def build_label(df: pd.DataFrame, target_col: str, epsilon: float = 0.0) -> np.n
     if target_col not in df.columns:
         raise ValueError(f"Column '{target_col}' not found in DataFrame.")
     return (pd.to_numeric(df[target_col], errors="coerce") > epsilon).astype(int).values
+
+
+def build_label_bins4(df: pd.DataFrame, target_col: str, time_col: str,
+                      bins_mode: str = "per_day",
+                      q: List[float] = None,
+                      min_group: int = 20) -> pd.Series:
+    """Assign 4-bin quartile labels (0=worst, 3=best).
+
+    bins_mode='per_day':  quartile cut points computed within each trading day
+                          (normalises for daily volatility regime).
+    bins_mode='global':   cut points computed across the entire dataset.
+
+    Rows with fewer than min_group trades in their group get NaN (excluded from training).
+    """
+    if q is None:
+        q = [0.25, 0.5, 0.75]
+    if target_col not in df.columns:
+        raise ValueError(f"Column '{target_col}' not found.")
+    if time_col not in df.columns:
+        raise ValueError(f"Time column '{time_col}' not found.")
+
+    s = pd.to_numeric(df[target_col], errors="coerce")
+
+    if bins_mode == "global":
+        cuts = s.quantile(q).values
+
+        def _to_bin(x):
+            if not np.isfinite(x):
+                return np.nan
+            if x <= cuts[0]: return 0
+            if x <= cuts[1]: return 1
+            if x <= cuts[2]: return 2
+            return 3
+
+        return s.apply(_to_bin).astype("Int64")
+
+    # per_day
+    t   = pd.to_datetime(df[time_col], errors="coerce")
+    day = t.dt.tz_localize(None).dt.normalize()
+    y   = pd.Series(np.nan, index=df.index, dtype="float")
+
+    for _d, idx in day.groupby(day).groups.items():
+        idx = list(idx)
+        ss  = s.loc[idx]
+        if ss.notna().sum() < min_group:
+            continue
+        cuts = ss.quantile(q).values
+
+        def _to_bin(x, _cuts=cuts):
+            if not np.isfinite(x):
+                return np.nan
+            if x <= _cuts[0]: return 0
+            if x <= _cuts[1]: return 1
+            if x <= _cuts[2]: return 2
+            return 3
+
+        y.loc[idx] = ss.apply(_to_bin)
+
+    return y.astype("Int64")
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +276,24 @@ class DataPreprocessor:
 
     def prepare(self, df: pd.DataFrame):
         """Run all pre-training transforms; return (df, y, features, weights, has_time)."""
-        df       = add_dte_and_normalized_returns(df)
-        y        = build_label(df, self.cfg.train_target)
+        df = add_dte_and_normalized_returns(df)
+
+        if self.cfg.label_mode == "bins4":
+            y_series = build_label_bins4(
+                df,
+                target_col=self.cfg.train_target,
+                time_col=self.cfg.time_col,
+                bins_mode=self.cfg.bins_mode,
+                q=self.cfg.bins_q,
+                min_group=self.cfg.bins_min_group,
+            )
+            # Drop rows where label is NaN (too few trades in that day)
+            mask = y_series.notna()
+            df   = df.loc[mask].reset_index(drop=True)
+            y    = y_series.loc[mask].astype(int).to_numpy()
+        else:
+            y = build_label(df, self.cfg.train_target)
+
         features = select_features(df, self.cfg.features, self.cfg.id_cols)
         weights  = self.compute_sample_weights(df)
         has_time = "trade_date" in df.columns
@@ -224,6 +313,8 @@ class ModelFactory:
     def create(cfg: WinnerClassifierConfig, seed_offset: int = 0):
         seed = cfg.random_state + seed_offset
 
+        is_4bin = (cfg.label_mode == "bins4")
+
         if cfg.model_type == "lgbm":
             from lightgbm import LGBMClassifier
             return LGBMClassifier(
@@ -236,7 +327,8 @@ class ModelFactory:
                 subsample_freq    = int(os.getenv("LGBM_BAGGING_FREQ",       "0")),
                 colsample_bytree  = float(os.getenv("LGBM_FEATURE_FRACTION", "0.8")),
                 reg_lambda        = float(os.getenv("LGBM_L2",               "5.0")),
-                objective         = "binary",
+                objective         = "multiclass" if is_4bin else "binary",
+                num_class         = 4 if is_4bin else None,
                 random_state      = seed,
                 n_jobs            = -1,
             )
@@ -247,8 +339,8 @@ class ModelFactory:
                 learning_rate= float(os.getenv("CAT_LR",   "0.05")),
                 depth        = int(os.getenv("CAT_DEPTH",  "6")),
                 l2_leaf_reg  = float(os.getenv("CAT_L2",   "6.0")),
-                loss_function= "Logloss",
-                eval_metric  = os.getenv("CAT_EVAL_METRIC", "AUC"),
+                loss_function= "MultiClass" if is_4bin else "Logloss",
+                eval_metric  = "MultiClass" if is_4bin else os.getenv("CAT_EVAL_METRIC", "AUC"),
                 random_seed  = seed,
                 verbose      = False,
                 task_type    = os.getenv("CAT_TASK_TYPE", "CPU"),
@@ -300,8 +392,11 @@ class CrossValidator:
                         early_stopping_rounds=self.cfg.early_stopping_rounds, verbose=False)
             else:  # lgbm
                 import lightgbm as lgb
+                # bins4 uses multiclass objective → metric must be multi_logloss
+                # binary uses binary objective → metric can be aucpr
+                lgbm_metric = "multi_logloss" if self.cfg.label_mode == "bins4" else "aucpr"
                 clf.fit(Xf, yf, sample_weight=wf, eval_set=[(Xe, ye)],
-                        eval_metric="aucpr",
+                        eval_metric=lgbm_metric,
                         callbacks=[lgb.early_stopping(self.cfg.early_stopping_rounds, verbose=False)])
         else:
             clf.fit(Xtr, ytr, sample_weight=wtr)
@@ -309,7 +404,12 @@ class CrossValidator:
 
     def run(self, df, y, features, weights, has_time):
         split_iter, split_kind = self._splitter(df, y, has_time)
-        proba_oof = np.full(len(df), np.nan, dtype=float)
+        is_4bin   = (self.cfg.label_mode == "bins4")
+        n_classes = 4 if is_4bin else 2
+
+        # proba_oof shape: (N, 4) for bins4, (N,) for binary
+        proba_oof = (np.full((len(df), n_classes), np.nan, dtype=float)
+                     if is_4bin else np.full(len(df), np.nan, dtype=float))
         fold_idx  = np.full(len(df), -1, dtype=int)
 
         for k, (tr, va) in enumerate(split_iter):
@@ -333,15 +433,20 @@ class CrossValidator:
                 va      = np.asarray(va)[mask_va.values]
                 yva_k   = y[va]
 
-            clf = ModelFactory.create(self.cfg, k)
-            clf = self._fit_fold(clf, Xtr, ytr, wtr, Xva, yva_k)
-            proba_oof[va] = clf.predict_proba(Xva)[:, 1]
-            fold_idx[va]  = k
+            clf  = ModelFactory.create(self.cfg, k)
+            clf  = self._fit_fold(clf, Xtr, ytr, wtr, Xva, yva_k)
+            pva  = clf.predict_proba(Xva)
+            if is_4bin:
+                proba_oof[va, :] = pva          # (n_val, 4)
+            else:
+                proba_oof[va]    = pva[:, 1]    # scalar proba for class=1
+            fold_idx[va] = k
 
-        # Fill any NaN slots with median
-        nan_mask = np.isnan(proba_oof)
-        if nan_mask.any():
-            proba_oof[nan_mask] = np.nanmedian(proba_oof)
+        if not is_4bin:
+            # Fill any NaN slots with median (binary only)
+            nan_mask = np.isnan(proba_oof)
+            if nan_mask.any():
+                proba_oof[nan_mask] = np.nanmedian(proba_oof)
 
         return proba_oof, fold_idx, split_kind
 
@@ -432,7 +537,37 @@ def save_feature_importances(clf, X_ref, y_ref, features, out_dir):
 # ---------------------------------------------------------------------------
 
 def save_evaluation_outputs(cfg, df, y, proba_oof, fold_idx, split_kind):
-    """Write PR curves, threshold table, and OOF scores."""
+    """Write PR curves, threshold table, and OOF scores.
+
+    For bins4 mode the OOF file uses the columns required by b03_train_tail:
+      row_idx, y_true, y_pred, p_bin0, p_bin1, p_bin2, p_bin3, fold, has_oof
+
+    For binary mode the OOF file uses the original format:
+      row_idx, proba_oof, label, fold
+    """
+    if cfg.label_mode == "bins4":
+        y_pred = np.argmax(proba_oof, axis=1)
+        oof_out = pd.DataFrame({
+            "row_idx": np.arange(len(df)),
+            "y_true":  y,
+            "y_pred":  y_pred,
+            "p_bin0":  proba_oof[:, 0],
+            "p_bin1":  proba_oof[:, 1],
+            "p_bin2":  proba_oof[:, 2],
+            "p_bin3":  proba_oof[:, 3],
+            "fold":    fold_idx,
+        })
+        oof_out["has_oof"] = (oof_out["fold"] != -1).astype(int)
+        oof_out.to_csv(os.path.join(cfg.output_dir, "winner_scores_oof.csv"), index=False)
+
+        # Multi-class accuracy metrics (no PR curve for multiclass)
+        valid   = oof_out["has_oof"] == 1
+        acc     = float((y_pred[valid] == y[valid]).mean())
+        f1m     = float(f1_score(y[valid], y_pred[valid], average="macro", zero_division=0))
+        print(f"[INFO] bins4 OOF  Accuracy={acc:.4f}  F1-macro={f1m:.4f}")
+        return
+
+    # --- binary mode ---
     precision, recall, thresholds = precision_recall_curve(y, proba_oof)
     coverage = [(proba_oof >= t).mean() for t in thresholds]
 
@@ -486,46 +621,110 @@ def train_final_model(cfg, prep, df, y, features):
     return clf, X_all, y_all
 
 
-def save_model_pack(cfg, prep, clf, features, df, proba_oof, y, roc_auc, pr_auc, split_kind):
-    """Compute best-F1 threshold, write metrics JSON, save model pack pickle."""
-    precision, recall, thresholds = precision_recall_curve(y, proba_oof)
-    best_f1, best_thr = -1.0, 0.5
-    for i, thr in enumerate(thresholds):
-        if i % 10 != 0 and i != len(thresholds) - 1:
-            continue
-        yh  = (proba_oof >= thr).astype(int)
-        f1  = f1_score(y, yh, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_thr = f1, float(thr)
+def save_model_pack(cfg, prep, clf, features, df, proba_oof, y, roc_auc, pr_auc, split_kind,
+                    fold_idx: np.ndarray = None):
+    """Write metrics JSON and save model pack pickle.
 
-    cm = confusion_matrix(y, (proba_oof >= best_thr).astype(int))
-    tn, fp, fn, tp = cm.ravel()
+    For bins4 mode: multi-class accuracy + top-vs-bottom spread metrics.
+                    Metrics are computed only on valid OOF rows (fold_idx != -1).
+    For binary mode: standard AUC + best-F1 threshold.
+    """
+    medians = prep.compute_medians(df, features) if cfg.impute_missing else None
 
-    metrics = {
-        "roc_auc_oof":             float(roc_auc),
-        "pr_auc_oof":              float(pr_auc),
-        "best_f1_threshold_oof":   float(best_thr),
-        "best_f1_oof":             float(best_f1),
-        "coverage_at_best_f1_oof": float((proba_oof >= best_thr).mean()),
-        "confusion_at_best_f1_oof":{"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
-        "features":                features,
-        "impute_missing":          cfg.impute_missing,
-        "use_weights":             cfg.use_weights,
-        "cv":                      {"kind": split_kind, "folds": cfg.oof_folds},
-    }
+    if cfg.label_mode == "bins4":
+        # Only evaluate rows that actually appeared in a validation fold.
+        # Rows with fold_idx == -1 (early TimeSeriesSplit rows) have NaN probabilities
+        # — including them in metrics would corrupt accuracy/F1.
+        if fold_idx is not None:
+            valid = (fold_idx != -1)
+        else:
+            # Fallback: p_bin0 is NaN for unscored rows, NaN >= 0 is False
+            valid = proba_oof[:, 0] >= 0
+        y_valid = y[valid]
+        y_pred  = np.argmax(proba_oof[valid], axis=1)
+        acc     = float((y_pred == y_valid).mean())
+        f1m     = float(f1_score(y_valid, y_pred, average="macro", zero_division=0))
+
+        # Top-vs-bottom decile spread (key trading metric from CSP_4bin_classifier_strategy_phase_brief.md)
+        # Measures whether high p_bin3 scores select better trades than low scores.
+        score = proba_oof[valid, 3]
+        # df is reset-indexed after prepare(); boolean indexing via numpy is safe
+        sret  = pd.to_numeric(
+            df[cfg.train_target].to_numpy()[valid], errors="coerce"
+        )
+        sret  = np.nan_to_num(sret, nan=0.0)
+        q90   = np.quantile(score, 0.90)
+        q10   = np.quantile(score, 0.10)
+        top_mean = float(sret[score >= q90].mean()) if np.any(score >= q90) else float("nan")
+        bot_mean = float(sret[score <= q10].mean()) if np.any(score <= q10) else float("nan")
+        spread   = float(top_mean - bot_mean) if np.isfinite(top_mean) and np.isfinite(bot_mean) else float("nan")
+        print(f"[INFO] bins4 spread  top10%_mean={top_mean:.3f}  bot10%_mean={bot_mean:.3f}  "
+              f"spread={spread:.3f}  (target={cfg.train_target})")
+        metrics = {
+            "task":                   "bins4_multiclass",
+            "accuracy":               acc,
+            "f1_macro":               f1m,
+            # Ranking spread: key signal of trading usefulness (CSP_4bin_classifier_strategy_phase_brief.md §8)
+            "top10pct_mean_target":   top_mean,
+            "bottom10pct_mean_target": bot_mean,
+            "top_minus_bottom_spread": spread,
+            "n_oof_valid":            int(valid.sum()),
+            "n_rows":                 int(len(df)),
+            "n_features":             int(len(features)),
+            "features":               features,
+            "cv":                     split_kind,
+            "bins_mode":              cfg.bins_mode,
+            "bins_q":                 cfg.bins_q,
+            "bins_min_group":         cfg.bins_min_group,
+            "train_target":           cfg.train_target,
+        }
+        pack = {
+            "model":          clf,
+            "model_type":     cfg.model_type,
+            "label_mode":     "bins4",
+            "features":       features,
+            "medians":        medians,
+            "impute_missing": cfg.impute_missing,
+            "metrics":        metrics,
+        }
+    else:
+        precision_arr, recall_arr, thresholds = precision_recall_curve(y, proba_oof)
+        best_f1, best_thr = -1.0, 0.5
+        for i, thr in enumerate(thresholds):
+            if i % 10 != 0 and i != len(thresholds) - 1:
+                continue
+            yh  = (proba_oof >= thr).astype(int)
+            f1  = f1_score(y, yh, zero_division=0)
+            if f1 > best_f1:
+                best_f1, best_thr = f1, float(thr)
+        cm = confusion_matrix(y, (proba_oof >= best_thr).astype(int))
+        tn, fp, fn, tp = cm.ravel()
+        metrics = {
+            "roc_auc_oof":              float(roc_auc),
+            "pr_auc_oof":               float(pr_auc),
+            "best_f1_threshold_oof":    float(best_thr),
+            "best_f1_oof":              float(best_f1),
+            "coverage_at_best_f1_oof":  float((proba_oof >= best_thr).mean()),
+            "confusion_at_best_f1_oof": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
+            "features":                 features,
+            "impute_missing":           cfg.impute_missing,
+            "use_weights":              cfg.use_weights,
+            "cv":                       {"kind": split_kind, "folds": cfg.oof_folds},
+        }
+        pack = {
+            "model":          clf,
+            "model_type":     cfg.model_type,
+            "label_mode":     "binary",
+            "features":       features,
+            "medians":        medians,
+            "impute_missing": cfg.impute_missing,
+            "metrics":        metrics,
+            "label":          f"{cfg.train_target} > 0",
+        }
+
     with open(os.path.join(cfg.output_dir, "winner_classifier_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
-    medians = prep.compute_medians(df, features) if cfg.impute_missing else None
-    pack = {
-        "model":         clf,
-        "model_type":    cfg.model_type,
-        "features":      features,
-        "medians":       medians,
-        "impute_missing":cfg.impute_missing,
-        "metrics":       metrics,
-        "label":         f"{cfg.train_target} > 0",
-    }
     fname = f"{cfg.model_name}_{cfg.model_type}.pkl"
     joblib.dump(pack, os.path.join(cfg.output_dir, fname))
     print(f"[INFO] Model pack saved → {cfg.output_dir}/{fname}")
@@ -551,32 +750,48 @@ def main():
     cfg.model_name = f"winner_classifier_model_{score_date}"
     ensure_dir(cfg.output_dir)
 
-    # Prepare data
+    # Prepare data (bins4 or binary labeling applied here)
     df, y, features, weights, has_time = prep.prepare(df)
 
     print(f"[INFO] Training on {len(df)} rows, {len(features)} features, "
-          f"model={cfg.model_type}, folds={cfg.oof_folds}")
+          f"model={cfg.model_type}, label_mode={cfg.label_mode}, folds={cfg.oof_folds}")
 
     # OOF cross-validation
     t0 = pd.Timestamp.now()
     proba_oof, fold_idx, split_kind = cv.run(df, y, features, weights, has_time)
     print(f"[INFO] OOF CV done in {pd.Timestamp.now() - t0}")
 
-    roc_auc = roc_auc_score(y, proba_oof) if len(np.unique(y)) > 1 else float("nan")
-    pr_auc  = average_precision_score(y, proba_oof)
-    print(f"[INFO] OOF  AUC-ROC={roc_auc:.4f}  AUC-PRC={pr_auc:.4f}")
+    # Mode-specific metrics
+    roc_auc = float("nan")
+    pr_auc  = float("nan")
+    if cfg.label_mode == "bins4":
+        valid  = fold_idx != -1
+        y_pred = np.argmax(proba_oof[valid], axis=1)
+        acc    = float((y_pred == y[valid]).mean())
+        f1m    = float(f1_score(y[valid], y_pred, average="macro", zero_division=0))
+        print(f"[INFO] bins4 OOF  Accuracy={acc:.4f}  F1-macro={f1m:.4f}")
+    else:
+        roc_auc = roc_auc_score(y, proba_oof) if len(np.unique(y)) > 1 else float("nan")
+        pr_auc  = average_precision_score(y, proba_oof)
+        print(f"[INFO] binary OOF  AUC-ROC={roc_auc:.4f}  AUC-PRC={pr_auc:.4f}")
 
-    # Save evaluation outputs
+    # Save OOF scores (bins4 format consumed by b03_train_tail)
     save_evaluation_outputs(cfg, df, y, proba_oof, fold_idx, split_kind)
 
     # Train final model on all data
     clf, X_all, y_all = train_final_model(cfg, prep, df, y, features)
 
-    # Save model pack + metrics
-    save_model_pack(cfg, prep, clf, features, df, proba_oof, y, roc_auc, pr_auc, split_kind)
+    # Save model pack + metrics (fold_idx needed to filter valid OOF rows in bins4 mode)
+    save_model_pack(cfg, prep, clf, features, df, proba_oof, y, roc_auc, pr_auc, split_kind,
+                    fold_idx=fold_idx)
 
-    print(f"\n✅ Winner classifier trained.")
-    print(f"   ROC AUC (OOF)={roc_auc:.4f}   PR AUC (OOF)={pr_auc:.4f}")
+    oof_path = os.path.join(cfg.output_dir, "winner_scores_oof.csv")
+    print(f"\n✅ Winner classifier trained ({cfg.label_mode} mode).")
+    if cfg.label_mode == "bins4":
+        print(f"   bins4 OOF Accuracy={acc:.4f}  F1-macro={f1m:.4f}")
+        print(f"   OOF scores → {oof_path}  (feed into b03_train_tail)")
+    else:
+        print(f"   ROC AUC (OOF)={roc_auc:.4f}   PR AUC (OOF)={pr_auc:.4f}")
     print(f"   CV: {split_kind}, folds={cfg.oof_folds}")
     print(f"   Outputs → {cfg.output_dir}/")
 

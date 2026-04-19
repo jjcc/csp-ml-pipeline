@@ -1,11 +1,13 @@
 # CSP ML Pipeline — Operating Instructions
 
-This pipeline trains and applies two independent binary classifiers on Cash-Secured Put (CSP) option trades:
+This pipeline trains and applies a two-stage scoring system on Cash-Secured Put (CSP) option trades:
 
-- **Winner Classifier** — scores how likely a trade is profitable (`win_proba`)
-- **Tail Classifier** — scores how likely a trade is a catastrophic loser (`tail_proba`)
+- **Winner Classifier (b01/b02)** — 4-bin multiclass model that ranks trades into quartiles (bin-0=worst, bin-3=best).  Produces `win_proba` and `p_bin3` reference scores.
+- **Tail Classifier (b03/b04)** — veto-layer binary classifier that identifies trades likely to produce catastrophic losses (bin-0 outcomes).  Produces `tail_proba`.  **Depends on b01** — it uses the winner model's 4-bin probabilities as input features.
 
-Both classifiers produce **reference scores**, not final decisions. You decide how to interpret and combine them based on your own risk tolerance and market view. The two classifiers can be run independently — you do not need to run both.
+Both classifiers produce **reference scores**, not final decisions. You decide how to interpret and combine them based on your own risk tolerance and market view.
+
+You can run only the winner classifier (b01/b02) independently.  To run the tail classifier (b03/b04), you must first run b01 for the same training window.
 
 ---
 
@@ -114,32 +116,42 @@ output/data_merged/merged_roll14w_20251110.csv
 
 The console output shows which batches were selected and how many rows.
 
-### Step 6 — Train and score (run whichever classifier(s) you need)
+### Step 6 — Train and score
 
-The winner and tail classifiers are independent.  Run one, both, or neither
-depending on what reference signals you want for this batch.
-
-#### Winner Classifier
+#### Step 6a — Winner Classifier (required first)
 
 ```bash
 python pipeline/b01_train_winner.py
 ```
+
+Trains a 4-bin multiclass LightGBM that ranks trades into quartile bins
+(bin-0 = worst return, bin-3 = best return) within each trading day.
 
 Outputs:
 
 ```
 output/winner_train/v9_roll14w_20251110/
   winner_classifier_model_20251110_lgbm.pkl
-  winner_scores_oof.csv
+  winner_scores_oof.csv           ← also used as input to b03
   winner_classifier_metrics.json
   threshold_table.csv
   precision_recall_coverage.png
 ```
 
-Key metric to check: **OOF AUC-ROC** and **OOF AUC-PRC** printed at the end.
-Acceptable ranges (rough): AUC-ROC > 0.60, AUC-PRC > 0.70.
+Key metrics to check: **bin-3 precision** and **bin-3 recall** printed at the end.
 
-#### Tail Classifier
+Then score the new batch:
+
+```bash
+python pipeline/b02_score_winner.py
+```
+
+Winner scores → `output/winner_score/v9_roll14w_20251110/scores_20251110.csv`
+
+#### Step 6b — Tail Classifier (optional; run AFTER b01)
+
+The tail classifier is a veto layer.  It uses the winner model's 4-bin OOF
+probabilities (`p_bin0-3`, `conflict_score`) as features, so b01 must run first.
 
 ```bash
 python pipeline/b03_train_tail.py
@@ -158,15 +170,13 @@ output/tails_train/v9_roll14w_20251110/
 Key metric: **OOF AUC-PRC** (precision-recall AUC is more informative than
 ROC-AUC for the imbalanced tail class).
 
-Then score the new batch with whichever model(s) you just trained:
+Then score the new batch (b04 also applies the winner model first internally):
 
 ```bash
-python pipeline/b02_score_winner.py    # win_proba reference scores
-python pipeline/b04_score_tail.py      # tail_proba reference scores
+python pipeline/b04_score_tail.py
 ```
 
-Winner scores → `output/winner_score/v9_roll14w_20251110/scores_20251110.csv`
-Tail scores   → `output/tails_score/v9_roll14w_20251110/tail_scores_20251110.csv`
+Tail scores → `output/tails_score/v9_roll14w_20251110/tail_scores_20251110.csv`
 
 ---
 
@@ -176,8 +186,10 @@ Tail scores   → `output/tails_score/v9_roll14w_20251110/tail_scores_20251110.c
 
 | Column | Meaning |
 |--------|---------|
-| `win_proba` | Probability the trade is profitable (0–1) |
-| `win_predict` | 1 = predicted winner at chosen threshold |
+| `p_bin3` | Probability trade falls in best quartile (0–1); use as the primary rank signal |
+| `p_bin0` | Probability trade falls in worst quartile (0–1) |
+| `win_proba` | Composite score (same as `p_bin3` in bins4 mode) |
+| `win_predict` | 1 = predicted top-bin at chosen threshold |
 
 ### Tail score columns
 
@@ -243,18 +255,28 @@ Decrease if you suspect a recent market regime change dominates.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `tail.pct` | 0.05 | Worst 5% by `return_mon` = tail label |
-| `tail.label_on` | `return_mon` | Column to rank; also `return_ann`, `return_pct` |
-| `tail.cv_type` | `stratified` | Use `time` for strict temporal separation |
-| `tail.model_type` | `gbm` | `lgbm` is faster for large windows |
+| `tail.winner_oof_csv` | auto | Path to winner_scores_oof.csv; resolved from active_score_date |
+| `tail.with_earnings` | 1 | Include earnings-window features if present in data |
+| `tail.model_name` | `tail_classifier_model` | Filename prefix for saved model pack |
+
+Labeling is fixed: `tail = 1` when `y_true == 0` (actual bin-0 / worst quartile from winner).
+Cross-validation reuses the winner fold structure (same fold column from winner_scores_oof.csv).
+The tail model always uses LightGBM with isotonic calibration — no separate `model_type` knob.
+
+`tailscoring.winner_model_in` must also point to the winner model .pkl so that b04
+can compute `p_bin0-3` features for new (unlabeled) trades before tail scoring.
 
 ### Winner classifier parameters
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
 | `winner.model_type` | `lgbm` | Also `catboost`, `rf` |
-| `winner.train_epsilon` | 0.02 | `return_mon > epsilon` = winner |
-| `winner.target_precision` | `0.88,0.92` | Threshold sweep targets |
+| `winner.label_mode` | `bins4` | `bins4` = 4-bin multiclass (default); `binary` = win/loss |
+| `winner.bins_mode` | `per_day` | `per_day` = quartiles within each trade date; `global` = absolute |
+| `winner.bins_q` | `[0.25,0.5,0.75]` | Cut-points for 4 bins |
+| `winner.bins_min_group` | 20 | Min trades per day to compute stable quartiles |
+| `winner.time_col` | `captureTime` | Column used to group trades by day |
+| `winner.target_precision` | `0.88,0.92` | Threshold sweep targets (binary mode only) |
 | `winnerscore.auto_calibrate` | 1 | Auto-picks threshold on held-out data |
 
 ---

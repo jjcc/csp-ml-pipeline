@@ -7,15 +7,13 @@ Priority order:
 
 Template placeholders in path values are resolved automatically:
 
-  {active_score_dataset}    — tag of active_score_dataset (e.g. "f")
-  {active_process_dataset}  — tag of active_process_dataset (e.g. "f")
-  {active_score_date}       — events_start_date of active_score_dataset as YYYYMMDD
-                               (e.g. "20251027" for events_start_date: 2025-10-27)
-                               Used in all output filenames so they are self-documenting.
-  {active_score_labeled_csv}— output_csv filename of active_score_dataset
-                               (e.g. "labeled_trades_f_1027.csv")
-  {rolling_window_weeks}    — integer rolling window size from config
-  {model_type}              — winner.model_type (e.g. "lgbm")
+  {active_score_date}        — events_start_date of dataset as YYYYMMDD
+                                (e.g. "20251027" for events_start_date: 2025-10-27)
+                                Used in all output filenames so they are self-documenting.
+  {active_score_labeled_csv} — output_csv filename from dataset config
+                                (e.g. "labeled_trades_current.csv")
+  {rolling_window_weeks}     — integer rolling window size from config
+  {model_type}               — winner.model_type (e.g. "lgbm")
 
 Usage
 -----
@@ -24,15 +22,14 @@ Usage
     # Simple key lookup
     val = getenv("ROLLING_WINDOW_WEEKS", "14")
 
-    # Dataset-specific config for current active_process_dataset
+    # Dataset config (single dataset, no batch tags)
     ds_cfg = config.get_active_dataset_config()
 
-    # Rolling training batches for current active_score_dataset
-    batches = config.get_rolling_train_batches()   # list of config dicts
+    # Rolling training window is applied in a05_merge_datasets.py by
+    # date-filtering the single labeled CSV (no batch list needed).
 """
 
 import os
-from datetime import datetime, timedelta
 
 import yaml
 from dotenv import load_dotenv
@@ -73,39 +70,31 @@ class ConfigLoader:
         return out
 
     def _compute_score_date(self, raw: dict) -> str:
-        """Return events_start_date of active_score_dataset as YYYYMMDD string.
+        """Return events_start_date of the dataset as YYYYMMDD string.
 
-        Falls back to the tag itself if the date cannot be found, so paths
-        degrade gracefully rather than crashing.
+        Reads from the single `dataset:` block in config.yaml.
+        Falls back to empty string if not found.
         """
-        score_tag = str(raw.get("active_score_dataset", "")).strip()
-        for _key, cfg in raw.get("common_configs", {}).items():
-            if isinstance(cfg, dict):
-                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
-                    date_str = cfg.get("events_start_date", "")
-                    if date_str:
-                        return date_str.replace("-", "")
-        return score_tag  # fallback
+        date_str = raw.get("dataset", {}).get("events_start_date", "")
+        return date_str.replace("-", "") if date_str else ""
 
     def _compute_score_labeled_csv(self, raw: dict) -> str:
-        """Return the output_csv filename for active_score_dataset.
+        """Return the output_csv filename from the dataset config.
 
-        E.g. "labeled_trades_f_1027.csv"
+        E.g. "labeled_trades_current.csv"
         """
-        score_tag = str(raw.get("active_score_dataset", "")).strip()
-        for _key, cfg in raw.get("common_configs", {}).items():
-            if isinstance(cfg, dict):
-                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
-                    return cfg.get("output_csv", "")
-        return ""
+        return raw.get("dataset", {}).get("output_csv", "")
 
     def _ensure_loaded(self) -> None:
         if self._config is None:
             raw = self._load_yaml_raw()
             self._config = self._flatten(raw)
             # Inject computed derived keys so templates can reference them
-            self._config["ACTIVE_SCORE_DATE"] = self._compute_score_date(raw)
+            self._config["ACTIVE_SCORE_DATE"]       = self._compute_score_date(raw)
             self._config["ACTIVE_SCORE_LABELED_CSV"] = self._compute_score_labeled_csv(raw)
+            # Kept for any legacy template references; always "current" in single-dataset mode
+            self._config.setdefault("ACTIVE_SCORE_DATASET",   "current")
+            self._config.setdefault("ACTIVE_PROCESS_DATASET", "current")
             if self.fallback_to_env:
                 load_dotenv(".env", override=False)
 
@@ -147,98 +136,42 @@ class ConfigLoader:
         return {k: v for k, v in self._config.items() if k.startswith(prefix)}
 
     def get_common_configs_raw(self) -> dict:
-        """Return the raw common_configs dict from YAML."""
-        return self._load_yaml_raw().get("common_configs", {})
+        """Return a dict with the single dataset config.
+
+        Returns {"current": dataset_cfg} for backward compatibility with any
+        code that iterates get_common_configs_raw().items().  With the
+        single-dataset design there is always exactly one entry.
+        """
+        ds = self._load_yaml_raw().get("dataset", {})
+        return {"current": ds} if ds else {}
 
     def get_active_dataset_config(self) -> dict:
-        """Return the dataset config dict for the current active_process_dataset.
+        """Return the single dataset config from config.yaml.
 
-        The tag is derived dynamically from each config's data_basic_csv, so
-        no hard-coded tag-to-key mapping is needed when new datasets are added.
+        In single-dataset mode there is no active_process_dataset tag —
+        every pipeline step operates on the one `dataset:` block.
 
-        Returns {} if no matching config is found.
+        Returns {} if the dataset block is missing from config.
         """
-        raw = self._load_yaml_raw()
-        active_tag = str(raw.get("active_process_dataset", "")).strip()
-        if not active_tag:
-            return {}
-
-        common_configs = raw.get("common_configs", {})
-        for _key, cfg in common_configs.items():
-            if isinstance(cfg, dict):
-                tag = _extract_dataset_tag(cfg.get("data_basic_csv", ""))
-                if tag == active_tag:
-                    return cfg
-
-        return {}
+        return self._load_yaml_raw().get("dataset", {})
 
     def get_score_dataset_config(self) -> dict:
-        """Return the dataset config dict for the current active_score_dataset."""
-        raw = self._load_yaml_raw()
-        score_tag = str(raw.get("active_score_dataset", "")).strip()
-        if not score_tag:
-            return {}
-
-        for _key, cfg in raw.get("common_configs", {}).items():
-            if isinstance(cfg, dict):
-                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
-                    return cfg
-        return {}
+        """Return the single dataset config (same as get_active_dataset_config)."""
+        return self._load_yaml_raw().get("dataset", {})
 
     def get_score_date(self) -> str:
-        """Return events_start_date of active_score_dataset as YYYYMMDD (e.g. '20251027')."""
+        """Return events_start_date of the dataset as YYYYMMDD (e.g. '20251027')."""
         self._ensure_loaded()
         return self._config.get("ACTIVE_SCORE_DATE", "")
 
     def get_rolling_train_batches(self) -> list:
-        """Return the list of dataset configs that fall within the rolling training window.
+        """Not used in single-dataset mode.
 
-        Selection rules:
-          - Window end   = events_start_date of active_score_dataset
-          - Window start = window_end − rolling_window_weeks
-          - Included     = all batches whose events_start_date is in [window_start, window_end)
-          - The active_score_dataset itself is always excluded
-          - Result is sorted chronologically by events_start_date
-
-        Returns a list of raw config dicts (same structure as common_configs entries).
+        Rolling window date filtering is done directly in a05_merge_datasets.py
+        by slicing the single labeled CSV on tradeTime.  This method returns []
+        so any legacy callers degrade gracefully rather than crashing.
         """
-        raw = self._load_yaml_raw()
-        score_tag    = str(raw.get("active_score_dataset", "")).strip()
-        window_weeks = int(raw.get("rolling_window_weeks", 14))
-
-        # Locate score dataset's start date
-        score_start: datetime | None = None
-        for _key, cfg in raw.get("common_configs", {}).items():
-            if isinstance(cfg, dict):
-                if _extract_dataset_tag(cfg.get("data_basic_csv", "")) == score_tag:
-                    try:
-                        score_start = datetime.fromisoformat(cfg["events_start_date"])
-                    except (KeyError, ValueError):
-                        pass
-                    break
-
-        if score_start is None:
-            return []
-
-        window_start = score_start - timedelta(weeks=window_weeks)
-
-        # Collect all batches whose start date falls in [window_start, score_start)
-        batches: list[tuple[datetime, dict]] = []
-        for _key, cfg in raw.get("common_configs", {}).items():
-            if not isinstance(cfg, dict):
-                continue
-            tag = _extract_dataset_tag(cfg.get("data_basic_csv", ""))
-            if tag == score_tag:
-                continue  # never include the score dataset in the training window
-            try:
-                batch_start = datetime.fromisoformat(cfg["events_start_date"])
-            except (KeyError, ValueError):
-                continue
-            if window_start <= batch_start < score_start:
-                batches.append((batch_start, cfg))
-
-        batches.sort(key=lambda x: x[0])
-        return [cfg for _, cfg in batches]
+        return []
 
     def get_derived_file(self, basic_csv: str):
         """Derive macro_csv and output_csv from the basic_csv stem."""
@@ -248,27 +181,6 @@ class ConfigLoader:
             output_csv = f"labeled_trades_{section}.csv"
             return macro_csv, output_csv
         return None, None
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-def _extract_dataset_tag(basic_csv: str) -> str:
-    """Derive the one-word dataset tag from a basic_csv filename.
-
-    Examples:
-        trades_raw_orig.csv      -> 'orig'
-        trades_raw_a_0811.csv    -> 'a'
-        trades_raw_f_1027.csv    -> 'f'
-    """
-    stem = basic_csv.replace(".csv", "")
-    parts = stem.split("_")
-    try:
-        idx = parts.index("raw")
-        return parts[idx + 1]
-    except (ValueError, IndexError):
-        return ""
 
 
 # ---------------------------------------------------------------------------

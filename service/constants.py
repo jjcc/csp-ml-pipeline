@@ -84,6 +84,18 @@ TAIL_EARNINGS_FEATS = [
     "post_earnings_within_3d",
 ]
 
+# 4-bin winner model probability features injected into the tail classifier.
+# These are the per-class probabilities from the 4-bin winner OOF output, plus
+# a derived conflict_score = p_bin0 * p_bin3 (high when the winner model is
+# simultaneously uncertain between best and worst quartile — a strong tail signal).
+BIN_PROB_FEATS = [
+    "p_bin0",
+    "p_bin1",
+    "p_bin2",
+    "p_bin3",
+    "conflict_score",
+]
+
 # All features combined (training default when WINNER_FEATURES is not set)
 ALL_FEATS = BASE_FEATS + GEX_FEATS + NEW_FEATS
 

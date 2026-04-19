@@ -2,26 +2,26 @@
 """
 a05_merge_datasets.py — Step 5: Build a rolling-window training dataset.
 
-Selects the last `rolling_window_weeks` weeks of labeled batches that precede
-the active_score_dataset, merges them into a single CSV, and writes it to
-output/data_merged/.
+Loads the single labeled dataset (produced by a04_label_data.py) and
+date-filters it to the rolling training window that precedes the scoring
+period defined in config.yaml.
 
 Output filename convention
 --------------------------
     merged_roll{W}w_{YYYYMMDD}.csv
 
-where W is rolling_window_weeks and YYYYMMDD is the events_start_date of the
-active_score_dataset.  Example: merged_roll14w_20251027.csv
+where W is rolling_window_weeks and YYYYMMDD is dataset.events_start_date.
+Example: merged_roll14w_20251027.csv
 
 This file is the direct input to b01_train_winner.py.
 
 Rolling window selection
 ------------------------
-    window_end   = events_start_date of active_score_dataset
+    window_end   = dataset.events_start_date   (= start of the scoring period)
     window_start = window_end − rolling_window_weeks
 
-All dataset configs whose events_start_date falls in [window_start, window_end)
-are included.  The score dataset itself is always excluded.
+Only rows whose tradeTime falls in [window_start, window_end) are kept.
+This naturally excludes the scoring period from the training set.
 
 Usage:
     python pipeline/a05_merge_datasets.py
@@ -29,93 +29,94 @@ Usage:
 
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from service.env_config import config, get_derived_file, getenv
+from service.env_config import config, getenv
 from service.constants import MAX_DAYS_TO_EXPIRATION
 
 
-def _labeled_csv_path(cfg: dict, prep_dir: str) -> str:
-    """Return the absolute path to the labeled macro CSV for a dataset config."""
-    basic_csv = cfg.get("data_basic_csv", "")
-    macro_csv, _ = get_derived_file(basic_csv)
-    if macro_csv is None:
-        raise ValueError(f"Cannot derive macro CSV path from data_basic_csv={basic_csv!r}")
-    return os.path.join(prep_dir, os.path.basename(macro_csv))
-
-
 def main() -> None:
-    output_dir = getenv("COMMON_OUTPUT_DIR", "output")
-    prep_dir   = os.path.join(output_dir, "data_prep")
-    merge_dir  = os.path.join(output_dir, "data_merged")
+    output_dir  = getenv("COMMON_OUTPUT_DIR", "output")
+    labeled_dir = os.path.join(output_dir, "data_labeled")
+    merge_dir   = os.path.join(output_dir, "data_merged")
     os.makedirs(merge_dir, exist_ok=True)
 
-    # --- Resolve rolling window batches ---
+    # --- Resolve dataset config and rolling window ---
     window_weeks = int(getenv("ROLLING_WINDOW_WEEKS", "14"))
-    batches      = config.get_rolling_train_batches()
+    ds_cfg       = config.get_score_dataset_config()
+    score_date   = config.get_score_date()   # YYYYMMDD, e.g. "20251027"
 
-    if not batches:
+    if not ds_cfg:
+        print("[ERROR] No dataset config found in config.yaml. Add a `dataset:` block.")
+        sys.exit(1)
+
+    score_start_str = ds_cfg.get("events_start_date", "")
+    output_csv      = ds_cfg.get("output_csv", "")
+
+    if not score_start_str:
+        print("[ERROR] dataset.events_start_date is not set in config.yaml.")
+        sys.exit(1)
+    if not output_csv:
+        print("[ERROR] dataset.output_csv is not set in config.yaml.")
+        sys.exit(1)
+
+    score_start  = pd.Timestamp(score_start_str).normalize()
+    window_start = score_start - timedelta(weeks=window_weeks)
+
+    labeled_path = os.path.join(labeled_dir, output_csv)
+    if not os.path.isfile(labeled_path):
         print(
-            "[ERROR] No training batches found for the rolling window.\n"
-            "  Check that active_score_dataset is set and common_configs contains\n"
-            "  at least one batch whose events_start_date falls within the window."
+            f"[ERROR] Labeled CSV not found: {labeled_path}\n"
+            f"  Run a01 → a04 first to produce the labeled dataset."
         )
         sys.exit(1)
 
-    score_date    = config.get_score_date()          # e.g. "20251027"
-    score_cfg     = config.get_score_dataset_config()
-    score_tag     = score_cfg.get("data_basic_csv", "?")
+    print(f"Loading labeled data: {labeled_path}")
+    df = pd.read_csv(labeled_path)
+    print(f"  Total rows in labeled CSV: {len(df):,}")
 
-    print(f"Rolling window: {window_weeks} weeks before {score_date} (score dataset: {score_tag})")
-    print(f"  → {len(batches)} training batch(es) selected:")
-    for b in batches:
-        print(f"     {b['data_basic_csv']}  [{b['events_start_date']} – {b['events_end_date']}]")
-
-    # --- Load and concatenate ---
-    dfs = []
-    for b in batches:
-        fpath = _labeled_csv_path(b, prep_dir)
-        if not os.path.isfile(fpath):
-            print(f"  [WARN] Missing: {fpath} — skipping this batch")
-            continue
-        df_i = pd.read_csv(fpath)
-        dfs.append(df_i)
-        print(f"  Loaded {len(df_i):>6,} rows  ← {os.path.basename(fpath)}")
-
-    if not dfs:
-        print("[ERROR] All batch files are missing.  Run a01–a04 for each batch first.")
+    # --- Date-filter to rolling training window ---
+    if "tradeTime" not in df.columns:
+        print("[ERROR] 'tradeTime' column not found in labeled CSV.")
         sys.exit(1)
 
-    merged = pd.concat(dfs, ignore_index=True)
-    print(f"\n  Total rows before filters : {len(merged):,}")
+    tt = pd.to_datetime(df["tradeTime"], errors="coerce")
+    mask = (tt >= window_start) & (tt < score_start)
+    train = df[mask].copy()
 
-    # --- Filters (same as original pipeline) ---
-    if "daysToExpiration" in merged.columns:
-        merged = merged[merged["daysToExpiration"] <= MAX_DAYS_TO_EXPIRATION]
-        print(f"  Rows after DTE ≤ {MAX_DAYS_TO_EXPIRATION} filter : {len(merged):,}")
+    print(f"\nRolling window : {window_start.date()} ≤ tradeTime < {score_start.date()}"
+          f"  ({window_weeks} weeks)")
+    print(f"  Rows in window : {len(train):,}  "
+          f"(excluded {len(df) - len(mask.sum() * 0 + mask.sum()):,} outside window)")
 
-    # Apply cutoff_date from the *last* batch in the window (most recent)
-    last_batch   = batches[-1]
-    cutoff_date  = last_batch.get("cutoff_date")
-    if cutoff_date:
-        before = len(merged)
-        merged = merged[
-            pd.to_datetime(merged["tradeTime"], errors="coerce")
-            <= pd.to_datetime(cutoff_date)
-        ]
-        print(f"  Rows after cutoff {cutoff_date}  : {len(merged):,}  (removed {before - len(merged):,})")
+    if train.empty:
+        print(
+            "[ERROR] No training rows found in the rolling window.\n"
+            "  Check that dataset.events_start_date is correct and that the labeled CSV\n"
+            "  contains trades from the preceding period."
+        )
+        sys.exit(1)
+
+    # --- DTE filter ---
+    if "daysToExpiration" in train.columns:
+        before = len(train)
+        train = train[train["daysToExpiration"] <= MAX_DAYS_TO_EXPIRATION]
+        removed = before - len(train)
+        if removed:
+            print(f"  After DTE ≤ {MAX_DAYS_TO_EXPIRATION} filter : {len(train):,}  (removed {removed:,})")
 
     # --- Write output ---
     out_name = f"merged_roll{window_weeks}w_{score_date}.csv"
     out_path = os.path.join(merge_dir, out_name)
-    merged.to_csv(out_path, index=False)
+    train.to_csv(out_path, index=False)
 
-    print(f"\n✅  Merged dataset written → {out_path}")
-    print(f"   {len(merged):,} rows  |  {len(batches)} batches  |  window = {window_weeks} weeks")
+    print(f"\n✅  Training set written → {out_path}")
+    print(f"   {len(train):,} rows  |  rolling window = {window_weeks} weeks")
 
 
 if __name__ == "__main__":

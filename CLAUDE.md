@@ -11,7 +11,9 @@ Rewritten from `csp_feature_lab2/` for cleaner structure and maintainability.
 pip install -r requirements.txt
 ```
 
-Change 2 lines at the top of `config.yaml`, then run the pipeline in order:
+All option data lives in a single folder (`option/put/`).  When you have new
+data, update the three date fields in the `dataset:` block of `config.yaml`
+(see section 2 below), then run the pipeline in order:
 
 ```bash
 # --- Data ingestion (per new batch) ---
@@ -23,12 +25,12 @@ python pipeline/a04_label_data.py       # label with win/loss outcomes
 # --- Training dataset ---
 python pipeline/a05_merge_datasets.py   # build rolling-window training set
 
-# --- Winner classifier  (run independently as needed) ---
-python pipeline/b01_train_winner.py     # train winner classifier
-python pipeline/b02_score_winner.py     # score: win_proba reference signal
+# --- Winner classifier ---
+python pipeline/b01_train_winner.py     # train 4-bin winner classifier; produces winner_scores_oof.csv
+python pipeline/b02_score_winner.py     # score new batch: win_proba reference signal
 
-# --- Tail classifier  (run independently as needed) ---
-python pipeline/b03_train_tail.py       # train tail-loss classifier
+# --- Tail classifier  (MUST run AFTER b01 — depends on winner_scores_oof.csv) ---
+python pipeline/b03_train_tail.py       # train tail veto classifier
 python pipeline/b04_score_tail.py       # score: tail_proba reference signal
 
 pytest test/                            # run tests
@@ -59,7 +61,8 @@ by `a05_merge_datasets.py` from `rolling_window_weeks` and the batch registry.
 3. Run: a01 → a02 → a03 → a04   (processes + labels the new batch)
 4. Set active_score_dataset to the same tag.
 5. Run: a05                       (auto-selects the rolling training window)
-6. Run: b01 → b02                 (train + score)
+6. Run: b01 → b02                 (train 4-bin winner + score)
+   Optional: b03 → b04            (train tail veto + score; b03 REQUIRES b01's winner_scores_oof.csv)
 ```
 
 That's it — no cumulative tags, no manual file naming.
@@ -182,29 +185,43 @@ output/data_labeled/labeled_trades_<section>.csv
   ↓  [a05_merge_datasets]
 output/data_merged/merged_roll{W}w_{YYYYMMDD}.csv     ← rolling window of last W weeks
           │
+          ↓  [b01_train_winner]
+output/winner_train/v9_roll{W}w_{YYYYMMDD}/
+  winner_classifier_model_{YYYYMMDD}_lgbm.pkl          ← 4-bin multiclass model
+  winner_scores_oof.csv                                ← OOF probabilities (p_bin0-3)
+          │
           ├──────────────────────────────────────────┐
-          ↓  [b01_train_winner]                      ↓  [b03_train_tail]
-output/winner_train/v9_roll{W}w_{YYYYMMDD}/          output/tails_train/v9_roll{W}w_{YYYYMMDD}/
-  winner_classifier_model_{YYYYMMDD}_lgbm.pkl          tail_classifier_model_{YYYYMMDD}.pkl
-          ↓  [b02_score_winner]                      ↓  [b04_score_tail]
-output/winner_score/v9_roll{W}w_{YYYYMMDD}/          output/tails_score/v9_roll{W}w_{YYYYMMDD}/
-  scores_{YYYYMMDD}.csv                               tail_scores_{YYYYMMDD}.csv
+          ↓  [b02_score_winner]                      ↓  [b03_train_tail]  ← REQUIRES b01 OOF
+output/winner_score/v9_roll{W}w_{YYYYMMDD}/          output/tails_train/v9_roll{W}w_{YYYYMMDD}/
+  scores_{YYYYMMDD}.csv                                tail_classifier_model_{YYYYMMDD}.pkl
+                                                       ↓  [b04_score_tail] ← applies winner first
+                                                     output/tails_score/v9_roll{W}w_{YYYYMMDD}/
+                                                       tail_scores_{YYYYMMDD}.csv
 ```
 
-The two classifiers are **independent** — run either or both depending on what you need:
-- **Winner (b01/b02)**: produces `win_proba` — reference score for likely profitable trades
-- **Tail (b03/b04)**: produces `tail_proba` — reference score for likely catastrophic losses
+### Three-layer defense system
 
-Both scores are inputs to your own decision process, not automated filters.
-See `INSTRUCTIONS.md` for how to read and optionally join the score files.
+| Layer | Script | Output |
+|-------|--------|--------|
+| 1. Day gate | (upstream) | only trade on eligible days |
+| 2. Winner ranker | b01 / b02 | `win_proba` — 4-bin ranking; prefer bin-3 trades |
+| 3. Tail veto | b03 / b04 | `tail_proba` — flag catastrophic-loss risk |
+
+**b03 depends on b01.**  The tail classifier uses the winner model's per-class OOF
+probabilities (`p_bin0-3`, `conflict_score = p_bin0 × p_bin3`) as features.
+Always run b01 before b03.  b04 likewise loads the winner model to compute
+those features for new trades before applying the tail model.
+
+See `INSTRUCTIONS.md` for full workflow guidance.
 
 ---
 
 ## Key Design Decisions
 
 ### Feature definitions in one place
-All feature groups (`BASE_FEATS`, `GEX_FEATS`, `NEW_FEATS`) live in
-`service/constants.py`.  Import from there; never redefine inline.
+All feature groups (`BASE_FEATS`, `GEX_FEATS`, `NEW_FEATS`, `TAIL_FEATS`,
+`BIN_PROB_FEATS`) live in `service/constants.py`.  Import from there; never
+redefine inline.
 
 ### Dynamic dataset tag resolution
 `service/env_config.py::get_active_dataset_config()` derives the dataset tag
@@ -232,6 +249,38 @@ Add problematic symbols to these JSON files instead of editing Python code.
 Paths like `"output/winner_train/v9_roll{rolling_window_weeks}w_{active_score_date}/"` are
 resolved by `service/env_config.py` whenever `getenv()` is called.
 See "Rolling Window Design" section above for the full placeholder table.
+
+### bins4 multiclass — critical correctness constraints
+
+These were identified as bugs and fixed (see `csp_feature_lab2/doc/bins4_quick_fixes.md`):
+
+**1. Label/target alignment (a04_label_data.py)**
+`y_bin` and the per-day quartile assignment must use the **same column** as
+`WINNER_TRAIN_TARGET` (default: `return_mon`), not `return_pct`.
+`a04_label_data.py::build_labeled_dataset()` now computes `return_per_day`,
+`return_ann`, and `return_mon` before calling `_assign_bins`, and `_assign_bins`
+groups by trade date and applies quartile cuts to `return_mon`.
+
+**2. LightGBM eval_metric for multiclass (b01_train_winner.py)**
+When `label_mode == "bins4"`, LightGBM uses `objective="multiclass"` which
+requires `eval_metric="multi_logloss"`.  Using `"aucpr"` (the binary default)
+causes a crash.  The metric is now selected conditionally:
+```python
+lgbm_metric = "multi_logloss" if self.cfg.label_mode == "bins4" else "aucpr"
+```
+
+**3. OOF NaN contamination in metrics (b01_train_winner.py)**
+Early rows in time-series CV never appear in the validation fold (`fold_idx == -1`).
+Their OOF probability rows remain `np.nan`.  `np.argmax` on NaN rows silently
+returns 0, corrupting accuracy and F1.  `save_model_pack` now receives `fold_idx`
+and filters with `valid = (fold_idx != -1)` before computing any metrics.
+
+**4. Top-vs-bottom spread metric (b01_train_winner.py)**
+The primary trading-quality signal — mean return of top-10% trades by `p_bin3`
+minus mean return of bottom-10% — was missing from model metrics.  It is now
+computed in `save_model_pack` and stored as `top_minus_bottom_spread` in the
+metrics JSON alongside `top10pct_mean_target`, `bottom10pct_mean_target`, and
+`n_oof_valid`.
 
 ---
 

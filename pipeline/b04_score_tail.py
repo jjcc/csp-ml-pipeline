@@ -2,27 +2,41 @@
 """
 b04_score_tail.py — Score trade candidates with the Tail-Loss Classifier.
 
-Loads a trained tail model pack, preprocesses input data exactly as training,
-applies probability scoring, selects a decision threshold, and writes scored
-output CSV files.
+The tail classifier is a VETO LAYER.  It identifies trades that are likely to
+produce catastrophic losses (bin-0 outcomes) even when the winner model ranked
+them highly.
 
-A trade flagged by the tail classifier (is_tail_pred=1) is predicted to fall
-in the worst-K% of outcomes — treat these as "avoid" signals.
+Because the tail classifier uses 4-bin winner probabilities (p_bin0-3,
+conflict_score) as features, this script applies the winner model first to
+generate those features, then runs the tail model.
+
+Pipeline:
+  1. Load winner model → apply to new trades → add p_bin0-3, conflict_score
+  2. Load tail model pack → score → apply isotonic calibrator → apply threshold
+  3. Write scored CSV + summary JSON
+
+High tail_proba => "likely a catastrophic loser — do not enter this trade."
 
 Usage:
     python pipeline/b04_score_tail.py
 
-Typical workflow (run after b03_train_tail.py):
-    python pipeline/b04_score_tail.py
+Required config (config.yaml / .env):
+    tailscoring.model_in          — path to tail model pack (.pkl from b03)
+    tailscoring.winner_model_in   — path to winner model pack (.pkl from b01)
+    tailscoring.score_input       — CSV of candidate trades to score
+    tailscoring.score_out_folder  — output directory
 """
 
+from __future__ import annotations
+
+import json
 import os
 import sys
-import json
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -31,15 +45,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from service.env_config import getenv
 from service.preprocess import add_dte_and_normalized_returns
 from service.tail_scoring import (
+    add_bin_prob_features,
+    apply_tail_threshold,
     load_tail_model,
     score_tail_data,
-    apply_tail_threshold,
     select_tail_threshold,
-    build_tail_labels,
-    calculate_tail_metrics,
     write_tail_metrics,
 )
-from service.utils import ensure_dir, prep_tail_training_df
+from service.utils import ensure_dir
 
 
 # ---------------------------------------------------------------------------
@@ -48,22 +61,22 @@ from service.utils import ensure_dir, prep_tail_training_df
 
 @dataclass
 class TailScoringConfig:
-    csv_in:          str
-    model_in:        str
-    csv_out_dir:     str
-    csv_out:         str
-    proba_col:       str
-    pred_col:        str
-    label_on:        str
-    tail_pct:        float
-    fixed_threshold: Optional[float]
+    csv_in:           str
+    model_in:         str
+    winner_model_in:  str           # winner model for computing p_bin0-3 features
+    csv_out_dir:      str
+    csv_out:          str
+    proba_col:        str
+    pred_col:         str
+    fixed_threshold:  Optional[float]
     target_precision: Optional[float]
-    target_recall:   Optional[float]
+    target_recall:    Optional[float]
 
 
 def load_scoring_config() -> TailScoringConfig:
     """Load tail scoring configuration from config.yaml / .env."""
-    csv_in   = getenv("TAILSCORING_SCORE_INPUT", "./candidates.csv")
+    csv_in = getenv("TAILSCORING_SCORE_INPUT", "./candidates.csv")
+
     model_in = getenv("TAILSCORING_MODEL_IN", "")
     if not model_in:
         raise SystemExit(
@@ -71,12 +84,22 @@ def load_scoring_config() -> TailScoringConfig:
             "Ensure tail_scoring.model_in is configured in config.yaml."
         )
 
+    winner_model_in = getenv("TAILSCORING_WINNER_MODEL_IN", "")
+    if not winner_model_in:
+        raise SystemExit(
+            "TAILSCORING_WINNER_MODEL_IN is not set.\n"
+            "The tail classifier requires the 4-bin winner model to compute "
+            "p_bin0-3 features before scoring.\n"
+            "Set tailscoring.winner_model_in in config.yaml to the winner model .pkl."
+        )
+
     csv_out_dir = getenv("TAILSCORING_SCORE_OUT_FOLDER", "output/tails_score/default")
-    csv_out     = os.path.join(csv_out_dir,
-                               getenv("TAILSCORING_SCORE_OUT", "tail_scores.csv"))
+    csv_out     = os.path.join(
+        csv_out_dir, getenv("TAILSCORING_SCORE_OUT", "tail_scores.csv")
+    )
 
     fixed_thr_str = getenv("TAILSCORING_THRESHOLD", "").strip()
-    fixed_thr = float(fixed_thr_str) if fixed_thr_str else None
+    fixed_thr     = float(fixed_thr_str) if fixed_thr_str else None
 
     prec_str = getenv("TAILSCORING_TARGET_PRECISION", "").strip()
     rec_str  = getenv("TAILSCORING_TARGET_RECALL",    "").strip()
@@ -84,12 +107,11 @@ def load_scoring_config() -> TailScoringConfig:
     return TailScoringConfig(
         csv_in=csv_in,
         model_in=model_in,
+        winner_model_in=winner_model_in,
         csv_out_dir=csv_out_dir,
         csv_out=csv_out,
-        proba_col=getenv("TAILSCORING_PROBA_COL",  "tail_proba"),
-        pred_col=getenv("TAILSCORING_PRED_COL",    "is_tail_pred"),
-        label_on=getenv("TAIL_LABEL_ON",            "return_mon").strip(),
-        tail_pct=float(getenv("TAIL_PCT",           "0.05")),
+        proba_col=getenv("TAILSCORING_PROBA_COL", "tail_proba"),
+        pred_col=getenv("TAILSCORING_PRED_COL",   "is_tail_pred"),
         fixed_threshold=fixed_thr,
         target_precision=float(prec_str) if prec_str else None,
         target_recall=float(rec_str) if rec_str else None,
@@ -104,7 +126,11 @@ def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
     """Load and preprocess score data — must match training transforms exactly."""
     df = pd.read_csv(cfg.csv_in)
 
-    required = ["symbol", "tradeTime"]
+    # Accept either column name for the symbol
+    if "baseSymbol" not in df.columns and "symbol" in df.columns:
+        df = df.rename(columns={"symbol": "baseSymbol"})
+
+    required = ["baseSymbol", "tradeTime"]
     missing  = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
@@ -113,7 +139,6 @@ def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
         )
 
     df = add_dte_and_normalized_returns(df)
-    df = prep_tail_training_df(df)
 
     if "tradeTime" in df.columns:
         df["tradeTime"] = pd.to_datetime(df["tradeTime"], errors="coerce")
@@ -126,36 +151,28 @@ def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def write_outputs(cfg: TailScoringConfig, out: pd.DataFrame,
-                  chosen_thr: float, y: Optional[np.ndarray],
-                  proba: np.ndarray) -> None:
+                  chosen_thr: float) -> None:
     os.makedirs(cfg.csv_out_dir, exist_ok=True)
-    ensure_dir(cfg.csv_out)
     out.to_csv(cfg.csv_out, index=False)
 
-    # Metrics if labels are available
-    if y is not None and len(np.unique(y)) > 1:
-        metrics = calculate_tail_metrics(y, proba)
-        write_tail_metrics(cfg.csv_out_dir, metrics)
-        print(f"  AUC-ROC: {metrics['auc_roc']:.4f}  "
-              f"AUC-PRC: {metrics['auc_prc']:.4f}")
+    n_flagged  = int(out[cfg.pred_col].sum()) if cfg.pred_col in out.columns else None
+    tail_rate  = float(out[cfg.pred_col].mean()) if n_flagged is not None else None
 
-    # Summary JSON
-    n_flagged = int(out[cfg.pred_col].sum()) if cfg.pred_col in out.columns else None
     summary = {
-        "rows":           int(len(out)),
-        "threshold":      float(chosen_thr),
-        "tails_flagged":  n_flagged,
-        "tail_rate":      round(float(out[cfg.pred_col].mean()), 4) if n_flagged is not None else None,
-        "safe_fraction":  round(float(1.0 - out[cfg.pred_col].mean()), 4) if n_flagged is not None else None,
+        "rows":          int(len(out)),
+        "threshold":     float(chosen_thr),
+        "tails_flagged": n_flagged,
+        "tail_rate":     round(tail_rate, 4) if tail_rate is not None else None,
+        "safe_fraction": round(1.0 - tail_rate, 4) if tail_rate is not None else None,
     }
     json_path = Path(cfg.csv_out).with_suffix(".json")
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
 
+    safe_pct = (1.0 - tail_rate) * 100 if tail_rate is not None else float("nan")
     print(f"  Scores → {cfg.csv_out}")
     print(f"  Threshold={chosen_thr:.6f} | flagged={n_flagged} "
-          f"({summary['tail_rate']*100:.1f}% of trades) | "
-          f"safe={summary['safe_fraction']*100:.1f}%")
+          f"({tail_rate*100:.1f}% of trades) | safe={safe_pct:.1f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -163,40 +180,48 @@ def write_outputs(cfg: TailScoringConfig, out: pd.DataFrame,
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    cfg  = load_scoring_config()
-    pack = load_tail_model(cfg.model_in)
-    print(f"[INFO] Tail model loaded from {cfg.model_in}")
-    print(f"       tail_pct={pack.tail_pct:.3f}  label_on={pack.label_on}  "
-          f"oof_auc={pack.oof_auc:.4f}")
+    cfg = load_scoring_config()
 
+    # ── Load winner model (needed for p_bin0-3 feature generation) ───────────
+    print(f"[INFO] Loading winner model: {cfg.winner_model_in}")
+    if not os.path.isfile(cfg.winner_model_in):
+        raise FileNotFoundError(f"Winner model not found: {cfg.winner_model_in}")
+    winner_pack = joblib.load(cfg.winner_model_in)
+
+    # ── Load tail model ───────────────────────────────────────────────────────
+    print(f"[INFO] Loading tail model: {cfg.model_in}")
+    pack = load_tail_model(cfg.model_in)
+    print(f"       oof_auc={pack.oof_auc:.4f}  "
+          f"contamination_rate={pack.contamination_rate:.1%}  "
+          f"tail_rate={pack.tail_rate:.1%}  "
+          f"threshold={pack.oof_best_threshold:.4f}")
+
+    # ── Load and preprocess candidate trades ──────────────────────────────────
     df = load_and_preprocess(cfg)
     print(f"[INFO] {len(df):,} rows loaded from {cfg.csv_in}")
 
-    # Score
+    # ── Apply winner model to generate p_bin0-3 and conflict_score features ──
+    print(f"[INFO] Applying winner model to generate bin probability features…")
+    df = add_bin_prob_features(df, winner_pack)
+    print(f"       p_bin3 mean={df['p_bin3'].mean():.3f}  "
+          f"conflict_score mean={df['conflict_score'].mean():.4f}")
+
+    # ── Score with tail model (applies calibrator if present) ─────────────────
     out, proba = score_tail_data(df, pack, cfg.proba_col)
 
-    # Labels (if available, for evaluation)
-    y = None
-    if cfg.label_on in df.columns:
-        try:
-            y, _ = build_tail_labels(df, cfg.label_on, pack.tail_pct)
-            out["is_tail"] = y
-        except Exception:
-            pass
-
-    # Threshold selection
+    # ── Threshold selection (no labels available for new data) ────────────────
     chosen_thr = select_tail_threshold(
-        proba, y, pack,
+        proba, None, pack,
         fixed_threshold=cfg.fixed_threshold,
         target_precision=cfg.target_precision,
         target_recall=cfg.target_recall,
     )
 
-    # Apply threshold
+    # ── Apply threshold ───────────────────────────────────────────────────────
     out = apply_tail_threshold(out, cfg.proba_col, cfg.pred_col, chosen_thr)
 
-    # Write outputs
-    write_outputs(cfg, out, chosen_thr, y, proba)
+    # ── Write outputs ─────────────────────────────────────────────────────────
+    write_outputs(cfg, out, chosen_thr)
 
     print(f"\n✅  Tail scoring complete. {len(out):,} rows scored.")
 
