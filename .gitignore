@@ -7,8 +7,8 @@ test/data/
 gpt_downloaded/
 models/
 .venv/
-option/
-gex101/
+/option
+/gex101
 prod/
 catboost_info/
 temp/

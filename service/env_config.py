@@ -35,11 +35,16 @@ import yaml
 from dotenv import load_dotenv
 
 
+def _resolve_default_config_path() -> str:
+    """Resolve the config file path, allowing an explicit override for batch runs."""
+    return os.getenv("CSP_CONFIG_PATH", "config.yaml")
+
+
 class ConfigLoader:
     """Load config from YAML + .env with template resolution."""
 
-    def __init__(self, config_path: str = "config.yaml", fallback_to_env: bool = True):
-        self.config_path = config_path
+    def __init__(self, config_path: str | None = None, fallback_to_env: bool = True):
+        self.config_path = config_path or _resolve_default_config_path()
         self.fallback_to_env = fallback_to_env
         self._config: dict | None = None   # flat, UPPER_SNAKE keys
         self._yaml_raw: dict | None = None  # raw nested YAML for section helpers
