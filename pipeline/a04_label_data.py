@@ -289,12 +289,14 @@ def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date) -> None:
 # ---------------------------------------------------------------------------
 
 def label_single_dataset() -> None:
-    """Label the enriched dataset produced by a01_build_features.py.
+    """Label the corporate-event-filtered dataset produced by a03_filter_trades.py.
 
-    Reads the enriched CSV (output/data_prep/<macro_csv>) derived from
-    dataset.data_basic_csv in config.yaml, applies exclusions and cutoff,
-    fetches expiry prices, computes PnL/returns, and writes the labeled CSV to
-    output/data_labeled/<dataset.output_csv>.
+    Reads dataset.filtered_trades_csv (the a03 output) so that corporate-event
+    filtering is honoured.  Falls back to the enriched macro CSV if the filtered
+    file is not found (with a warning), so the step can still run if a02/a03
+    were skipped for testing purposes.
+
+    Writes the labeled CSV to output/data_labeled/<dataset.output_csv>.
     """
     from service.env_config import config, get_derived_file
 
@@ -305,33 +307,46 @@ def label_single_dataset() -> None:
             "Add a `dataset:` block to config.yaml."
         )
 
-    basic_csv   = ds_cfg.get("data_basic_csv", "")
-    cutoff_date = ds_cfg.get("cutoff_date")
-    output_csv  = ds_cfg.get("output_csv", "")
+    cutoff_date      = ds_cfg.get("cutoff_date")
+    output_csv       = ds_cfg.get("output_csv", "")
+    filtered_csv     = ds_cfg.get("filtered_trades_csv", "")
 
     if not cutoff_date:
         raise SystemExit("dataset.cutoff_date is not set in config.yaml.")
     if not output_csv:
         raise SystemExit("dataset.output_csv is not set in config.yaml.")
 
-    macro_csv, _ = get_derived_file(basic_csv)
-    if not macro_csv:
-        raise SystemExit(f"Cannot derive enriched CSV name from data_basic_csv={basic_csv!r}")
+    # Prefer the filtered output from a03 (corporate-event filtering applied).
+    # Fall back to the enriched macro CSV only if filtered file is absent.
+    if filtered_csv and os.path.isfile(filtered_csv):
+        fpath = filtered_csv
+        print(f"\nProcessing (filtered): {filtered_csv}")
+        df = pd.read_csv(fpath)
+    else:
+        if filtered_csv:
+            print(
+                f"[WARN] Filtered CSV not found: {filtered_csv}\n"
+                f"       Run a03_filter_trades.py to apply corporate-event filtering.\n"
+                f"       Falling back to enriched macro CSV (no event filtering)."
+            )
+        basic_csv = ds_cfg.get("data_basic_csv", "")
+        macro_csv, _ = get_derived_file(basic_csv)
+        if not macro_csv:
+            raise SystemExit(
+                f"Cannot derive enriched CSV name from data_basic_csv={basic_csv!r}"
+            )
+        input_dir = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
+        fpath     = os.path.join(input_dir, macro_csv)
+        if not os.path.isfile(fpath):
+            raise SystemExit(
+                f"Enriched CSV not found: {fpath}\n"
+                f"  Run a01_build_features.py first."
+            )
+        print(f"\nProcessing (unfiltered): {macro_csv}")
+        df = pd.read_csv(fpath, index_col="row_id")
 
-    input_dir = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
-    fpath     = os.path.join(input_dir, macro_csv)
-
-    if not os.path.isfile(fpath):
-        raise SystemExit(
-            f"Enriched CSV not found: {fpath}\n"
-            f"  Run a01_build_features.py first."
-        )
-
-    print(f"\nProcessing: {macro_csv}")
-    df      = pd.read_csv(fpath, index_col="row_id")
     exclude = load_exclude_symbols()
-
-    before = len(df)
+    before  = len(df)
     df = df[~df["baseSymbol"].isin(exclude)].copy()
     if len(df) != before:
         print(f"  Excluded {before - len(df)} rows from known bad symbols.")

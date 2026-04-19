@@ -280,8 +280,10 @@ def _per_symbol_feature_frame(s_px: pd.Series, start_date, max_trade_date) -> pd
         print(f"Reindexing error for symbol prices: {ex}")
         # return empty dataframe
         return pd.DataFrame(index=cal)
-    daily_ff = daily.bfill() # fill NaN caused by holidays with the next day's price
-    # critical line: DO NOT ffill beyond last_px_date (keeps today's Close as NaN)
+    # Forward-fill holiday gaps with the most recent PAST close (no leakage).
+    # bfill would use the next future close for holidays, which is future leakage.
+    daily_ff = daily.ffill()
+    # DO NOT fill beyond the last real price date (keeps future dates as NaN)
     daily_ff.loc[daily_ff.index > last_px_date] = np.nan
 
     # 1-day returns on ffilled series; today's ret is NaN if today's Close is NaN

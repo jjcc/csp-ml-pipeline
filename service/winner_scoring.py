@@ -54,6 +54,7 @@ class WinnerModelPack:
     medians: Optional[Dict[str, float]]
     impute_missing: bool
     best_f1_threshold: float
+    label_mode: str = "bins4"          # "bins4" (multiclass) or "binary"
     metrics: Optional[Dict[str, Any]] = None
 
 
@@ -89,7 +90,8 @@ def load_winner_model(model_path: str) -> WinnerModelPack:
         raise KeyError("Model pack must contain 'model' and 'features' keys")
 
     # Simplified impute_missing logic: prefer explicit value, fall back to medians existence
-    impute_missing = pack.get("impute_missing", pack.get("medians") is not None)
+    impute_missing    = pack.get("impute_missing", pack.get("medians") is not None)
+    label_mode        = pack.get("label_mode", "bins4")
     best_f1_threshold = pack.get("metrics", {}).get("best_f1_threshold", DEFAULT_THRESHOLD)
 
     return WinnerModelPack(
@@ -98,6 +100,7 @@ def load_winner_model(model_path: str) -> WinnerModelPack:
         medians=pack.get("medians"),
         impute_missing=bool(impute_missing),
         best_f1_threshold=float(best_f1_threshold),
+        label_mode=str(label_mode),
         metrics=pack.get("metrics")
     )
 
@@ -133,13 +136,25 @@ def score_winner_data(df: pd.DataFrame, model_pack: WinnerModelPack,
     )
 
     try:
-        proba = model_pack.model.predict_proba(X)[:, 1]
+        all_proba = model_pack.model.predict_proba(X)
     except Exception as e:
         logger.error(f"Model prediction failed: {e}")
         raise
 
     scored_df = df.loc[mask].copy()
-    scored_df[proba_col] = proba
+
+    if model_pack.label_mode == "bins4":
+        # 4-class multiclass: columns are [p_bin0, p_bin1, p_bin2, p_bin3]
+        # Primary signal: p_bin3 (probability of best-quartile outcome)
+        for i in range(all_proba.shape[1]):
+            scored_df[f"p_bin{i}"] = all_proba[:, i]
+        scored_df["conflict_score"] = all_proba[:, 0] * all_proba[:, 3]
+        proba = all_proba[:, 3]                    # p_bin3 = win_proba
+        scored_df[proba_col] = proba
+    else:
+        # Binary: index 1 = positive class
+        proba = all_proba[:, 1]
+        scored_df[proba_col] = proba
 
     return scored_df, proba, mask
 

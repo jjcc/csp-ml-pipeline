@@ -43,7 +43,6 @@ class ScoringConfig:
     pred_col: str
     train_target: str
     gex_filter: bool
-    use_other_model: bool
     model_type: str
     fixed_threshold: Optional[float]
     use_pack_f1: bool
@@ -94,19 +93,19 @@ def load_scoring_config() -> ScoringConfig:
         model_in=model_in,
         csv_out_dir=csv_out_dir,
         csv_out=csv_out,
-        proba_col=getenv("WINNERSCORE_PROBA_COL", "prob_winner"),
-        pred_col=getenv("WINNERSCORE_PRED_COL", "pred_winner"),
+        proba_col=getenv("WINNERSCORE_PROBA_COL", "win_proba"),
+        pred_col=getenv("WINNERSCORE_PRED_COL", "win_predict"),
         train_target=getenv("WINNER_TRAIN_TARGET", "return_mon").strip(),
         gex_filter=gex_filter,
-        use_other_model=use_other_model,
         model_type=model_type,
         fixed_threshold=fixed_threshold,
-        use_pack_f1=str(getenv("WINNER_SCORE_USE_PACK_BEST_F1", "1")).lower() in {"1", "true", "yes", "y", "on"},
+        # Key names follow config.yaml → winnerscore.* flattened as WINNERSCORE_*
+        use_pack_f1=str(getenv("WINNERSCORE_USE_PACK_BEST_F1", "1")).lower() in {"1", "true", "yes", "y", "on"},
         target_precisions=target_precisions,
         target_recalls=target_recalls,
-        auto_calibrate=str(getenv("WINNER_SCORE_AUTO_CALIBRATE", "0")).lower() in {"1", "true", "yes", "y", "on"},
+        auto_calibrate=str(getenv("WINNERSCORE_AUTO_CALIBRATE", "1")).lower() in {"1", "true", "yes", "y", "on"},
         split_file=split_file,
-        use_oof=True,  # TODO: Make this configurable
+        use_oof=True,
         train_epsilon=float(getenv("WINNER_TRAIN_EPSILON", "0.00")),
         write_sweep=str(getenv("WRITE_SWEEP", "1")).lower() in {"1", "true", "yes", "y", "on"},
         process_on_fly=str(getenv("PROCESS_ON_FLY", "0")).lower() in {"1", "true", "yes", "y", "on"}
@@ -128,8 +127,8 @@ def load_and_preprocess_data(config: ScoringConfig) -> pd.DataFrame:
     """Load and preprocess input data."""
     df = pd.read_csv(config.csv_in)
 
-    # Validate required columns exist
-    required_cols = ["symbol", "tradeTime"]
+    # Validate required columns exist — the labeled CSV uses "baseSymbol", not "symbol"
+    required_cols = ["baseSymbol", "tradeTime"]
     missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in input CSV: {missing_cols}. "

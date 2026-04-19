@@ -92,7 +92,7 @@ def main() -> None:
     print(f"\nRolling window : {window_start.date()} ≤ tradeTime < {score_start.date()}"
           f"  ({window_weeks} weeks)")
     print(f"  Rows in window : {len(train):,}  "
-          f"(excluded {len(df) - len(mask.sum() * 0 + mask.sum()):,} outside window)")
+          f"(excluded {len(df) - int(mask.sum()):,} outside window)")
 
     if train.empty:
         print(

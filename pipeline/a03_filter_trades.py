@@ -70,8 +70,18 @@ def load_config(config_path: str = "corp_action_config.yaml") -> FilterConfig:
             days_after_expiry=settings.get("days_after_expiry", 0),
         )
 
-    # Build paths from dataset config
-    trades_input = os.path.join(dataset_cfg.get("data_dir", ""), dataset_cfg.get("data_basic_csv", ""))
+    # Build trades path: a01 writes the enriched CSV to output/data_prep/,
+    # not to the raw data_dir.  Derive the macro CSV name from data_basic_csv.
+    from service.env_config import get_derived_file, getenv as _getenv
+    basic_csv   = dataset_cfg.get("data_basic_csv", "")
+    macro_csv, _ = get_derived_file(basic_csv)
+    if not macro_csv:
+        raise SystemExit(
+            f"Cannot derive enriched CSV name from data_basic_csv={basic_csv!r}. "
+            "Check the dataset.data_basic_csv field in config.yaml."
+        )
+    prep_dir     = os.path.join(_getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
+    trades_input = os.path.join(prep_dir, macro_csv)
 
     return FilterConfig(
         trades_csv=trades_input,
