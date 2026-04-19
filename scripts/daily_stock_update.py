@@ -16,6 +16,7 @@ import os
 from a00build_dataset_with_features import ensure_cache_dir
 from service.utils import get_symbols_last_few_days, download_prices_batched
 from service.data_prepare import COMMON_START_DATE, _load_cached_price_data, _save_cached_price_data
+from service.env_config import getenv
 
 
 
@@ -96,7 +97,7 @@ def stock_price_update(test = False):
     print(f"Previous day: {previous_day}, Today: {today}")
     out_dir = os.getenv("CACHE_DIR", "./output")
 
-    folder = "option/put"
+    folder = getenv("DATASET_DATA_DIR", "option/put")
     end_date = today
     # TODO: check the following line
     #end_date = today -pd.Timedelta(days=1) if today.hour < 16 else today

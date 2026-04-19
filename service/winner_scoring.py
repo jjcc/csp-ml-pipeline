@@ -92,7 +92,11 @@ def load_winner_model(model_path: str) -> WinnerModelPack:
     # Simplified impute_missing logic: prefer explicit value, fall back to medians existence
     impute_missing    = pack.get("impute_missing", pack.get("medians") is not None)
     label_mode        = pack.get("label_mode", "bins4")
-    best_f1_threshold = pack.get("metrics", {}).get("best_f1_threshold", DEFAULT_THRESHOLD)
+    metrics = pack.get("metrics", {})
+    best_f1_threshold = metrics.get(
+        "best_f1_threshold",
+        metrics.get("best_f1_threshold_oof", DEFAULT_THRESHOLD),
+    )
 
     return WinnerModelPack(
         model=pack["model"],
@@ -101,7 +105,7 @@ def load_winner_model(model_path: str) -> WinnerModelPack:
         impute_missing=bool(impute_missing),
         best_f1_threshold=float(best_f1_threshold),
         label_mode=str(label_mode),
-        metrics=pack.get("metrics")
+        metrics=metrics
     )
 
 

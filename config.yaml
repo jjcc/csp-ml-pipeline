@@ -30,8 +30,8 @@ dataset:
   events_end_date:      "2025-11-07"              # ← update: last day of scoring window
   events_output:        "output/data_prep/corp_events/events_current.csv"
   tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_current.txt"
-  filtered_trades_csv:  "option/put/filtered/trades_filtered_current.csv"
-  filtered_out_csv:     "option/put/filtered/trades_excluded_current.csv"
+  filtered_trades_csv:  "{data_dir}/filtered/trades_filtered_current.csv"
+  filtered_out_csv:     "{data_dir}/filtered/trades_excluded_current.csv"
 
 # ============================================================
 # Output directory layout

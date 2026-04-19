@@ -156,7 +156,18 @@ def load_and_preprocess_data(config: ScoringConfig) -> pd.DataFrame:
         if "tradeTime" in df_split.columns:
             df_split["tradeTime"] = pd.to_datetime(df_split["tradeTime"], errors="coerce")
 
-        df = df.merge(df_split, on=["symbol", "tradeTime"], how="left")
+        join_cols = None
+        if "baseSymbol" in df.columns and "baseSymbol" in df_split.columns:
+            join_cols = ["baseSymbol", "tradeTime"]
+        elif "symbol" in df.columns and "symbol" in df_split.columns:
+            join_cols = ["symbol", "tradeTime"]
+        else:
+            raise ValueError(
+                "Split file must share either ['baseSymbol', 'tradeTime'] or "
+                "['symbol', 'tradeTime'] with the score input."
+            )
+
+        df = df.merge(df_split, on=join_cols, how="left")
 
         # Clean up duplicate columns from merge
         col_x = [col for col in df.columns if col.endswith("_x")]

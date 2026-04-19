@@ -107,6 +107,7 @@ class ConfigLoader:
             "{active_process_dataset}":  self._config.get("ACTIVE_PROCESS_DATASET", ""),
             "{active_score_date}":       self._config.get("ACTIVE_SCORE_DATE", ""),
             "{active_score_labeled_csv}": self._config.get("ACTIVE_SCORE_LABELED_CSV", ""),
+            "{data_dir}":                self._config.get("DATASET_DATA_DIR", ""),
             "{rolling_window_weeks}":    self._config.get("ROLLING_WINDOW_WEEKS", "14"),
             "{model_type}":              self._config.get("WINNER_MODEL_TYPE", "lgbm"),
         }
