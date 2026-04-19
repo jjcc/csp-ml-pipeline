@@ -186,9 +186,7 @@ def pick_threshold_auto(
     if targets_prec:
         t = targets_prec[0]
         chosen = None
-        for idx, thr in enumerate(sorted(thresholds)):
-            if idx % 5 != 0:
-                continue
+        for thr in sorted(thresholds):
             m = metrics_at(thr)
             if m["precision"] >= t:
                 chosen = m; break
@@ -200,9 +198,7 @@ def pick_threshold_auto(
     if targets_rec:
         t = targets_rec[0]
         chosen = None
-        for idx, thr in enumerate(sorted(thresholds, reverse=True)):
-            if idx % 5 != 0:
-                continue
+        for thr in sorted(thresholds, reverse=True):
             m = metrics_at(thr)
             if m["recall"] >= t:
                 chosen = m

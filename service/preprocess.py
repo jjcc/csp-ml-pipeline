@@ -76,22 +76,14 @@ def pick_daily_snapshot_files(data_dir: str, pattern: str, target_time_str: str 
     chosen = [str(Path(p)) for p in chosen]
     return sorted(chosen)
 
-def filter_by_dte(df, dte_weekday_map = {4:0, 3:1}):
-    """
-    Docstring for filter_by_dte
+def filter_by_dte(df, max_dte: int = 8):
+    """Keep only rows where daysToExpiration <= max_dte.
 
-    :param df: input dataframe
-    :param dte_weekday_map: mapping of days to expiration (DTE) to expected capture weekday
-        {4:0, 3:1} means DTE 4 should be captured on Monday (0), DTE 3 on Tuesday (1)
-        {11:0, 10:1} means DTE 11 should be captured on Monday (0), DTE 10 on Tuesday (1)
-    :return: filtered dataframe
+    Previously filtered to {DTE=4 on Monday, DTE=3 on Tuesday} (weekly options
+    captured at open of the expiry week). Expanded to max_dte=8 to include all
+    weekdays and bi-weekly options within a rolling 8-calendar-day horizon.
     """
-
-    dtes = [dte for dte in dte_weekday_map]
-    weekdays = [dte_weekday_map[dte] for dte in dtes]
-    df_filtered = df[df["daysToExpiration"].isin(dtes)]
-    df_filtered = df_filtered[df_filtered["captureWeekday"].isin(weekdays)]
-    return df_filtered
+    return df[df["daysToExpiration"] <= max_dte].copy()
 
 def keep_one_row_per_contract_per_day(
             df,

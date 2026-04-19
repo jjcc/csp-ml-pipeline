@@ -159,6 +159,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Drop the final score window if it has fewer trade days than the configured chunk size.",
     )
+    parser.add_argument(
+        "--scoring-weeks",
+        type=int,
+        default=None,
+        help="How many calendar weeks of scoring data to include after the warm-up period. "
+             "end_date defaults to first_score_candidate + scoring_weeks (default 4). "
+             "Ignored when --end-date is supplied explicitly.",
+    )
     return parser.parse_args()
 
 
@@ -323,6 +331,7 @@ def collect_summary_row(
     train_rows: int,
     status: str,
     previous_window: ScoreWindow | None,
+    regime_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tag = window.tag
     paths = window_output_paths(output_dir, rolling_weeks, tag)
@@ -356,6 +365,8 @@ def collect_summary_row(
     merge_prefixed("winner_score_", winner_score)
     merge_prefixed("tail_train_", tail_train)
     merge_prefixed("tail_score_", tail_score)
+    if regime_stats:
+        row.update(regime_stats)
     return row
 
 
@@ -391,6 +402,7 @@ def main() -> None:
     ).normalize()
     end_date_raw = _coalesce_str(args.end_date, "BACKFILL_END_DATE", "")
     end_date = pd.Timestamp(end_date_raw).normalize() if end_date_raw else None
+    scoring_weeks = _coalesce_int(args.scoring_weeks, "BACKFILL_SCORING_WEEKS", 4)
     python_exe = _coalesce_str(args.python, "BACKFILL_PYTHON", sys.executable)
     max_windows = _coalesce_int(args.max_windows, "BACKFILL_MAX_WINDOWS", 0)
     skip_prep = _coalesce_bool(args.skip_prep, "BACKFILL_SKIP_PREP", False)
@@ -407,25 +419,23 @@ def main() -> None:
     summary_csv = backfill_dir / "rolling_window_summary.csv"
     first_score_candidate = history_start_date + timedelta(weeks=rolling_weeks)
 
+    # Resolve effective end date before building any config so that build_prep_config
+    # always receives the correct overall_end (fixes the cutoff_date being set to
+    # history_start_date + 21 days when end_date was None).
+    if end_date is None:
+        end_date = first_score_candidate + timedelta(weeks=scoring_weeks)
+        print(
+            f"[INFO] end_date not provided; defaulting to first_score_candidate "
+            f"+ {scoring_weeks} weeks = {end_date.date()}. "
+            f"Use --scoring-weeks or --end-date to adjust."
+        )
+
     if not skip_prep:
         prep_cfg = build_prep_config(
             base_cfg=base_cfg,
             overall_start=history_start_date,
-            overall_end=end_date if end_date is not None else history_start_date,
+            overall_end=end_date,
         )
-        # If no explicit end date was provided, infer it from available option filenames by
-        # reading the latest labeled date after prep.  For the initial prep pass, widen to
-        # the latest configured option snapshot date by using the latest GEX/option date we
-        # can see from the mounted folders later in the process.
-        if end_date is None:
-            option_glob = sorted((PROJECT_ROOT / "option" / "put").glob("coveredPut_*.csv"))
-            if not option_glob:
-                raise SystemExit("No option snapshot files found under option/put.")
-            last_name = option_glob[-1].name
-            inferred_end = pd.Timestamp(last_name.split("_")[1]).normalize()
-            prep_cfg["dataset"]["events_end_date"] = inferred_end.strftime("%Y-%m-%d")
-            prep_cfg["dataset"]["cutoff_date"] = (inferred_end + pd.Timedelta(days=21)).strftime("%Y-%m-%d")
-
         prep_cfg_path = config_dir / "prep_full_history.yaml"
         save_yaml(prep_cfg_path, prep_cfg)
 
@@ -444,8 +454,6 @@ def main() -> None:
 
     labeled_csv = resolve_labeled_csv(base_cfg)
     labeled_df = load_labeled_data(labeled_csv)
-    if end_date is None:
-        end_date = pd.Timestamp(labeled_df["trade_date"].max()).normalize()
 
     trade_dates = sorted(pd.Series(labeled_df["trade_date"].unique()).tolist())
     windows = build_score_windows(
@@ -475,8 +483,32 @@ def main() -> None:
         train_start = window.start - timedelta(weeks=rolling_weeks)
         train_end = window.start - pd.Timedelta(days=1)
         train_mask = (labeled_df["trade_date"] >= train_start) & (labeled_df["trade_date"] < window.start)
+        score_mask = (labeled_df["trade_date"] >= window.start) & (labeled_df["trade_date"] <= window.end)
         train_rows = int(train_mask.sum())
         previous_window = windows[idx - 2] if idx > 1 else None
+
+        # Regime stats: compare score-window return distribution against training window.
+        # A large win-rate gap flags windows where market conditions diverged from training.
+        train_slice = labeled_df.loc[train_mask, "return_mon"] if train_mask.any() else pd.Series(dtype=float)
+        score_slice = labeled_df.loc[score_mask, "return_mon"] if score_mask.any() else pd.Series(dtype=float)
+        train_win_rate   = float((train_slice > 0).mean()) if len(train_slice) else float("nan")
+        score_win_rate   = float((score_slice > 0).mean()) if len(score_slice) else float("nan")
+        train_mean_ret   = float(train_slice.mean()) if len(train_slice) else float("nan")
+        score_mean_ret   = float(score_slice.mean()) if len(score_slice) else float("nan")
+        win_rate_gap     = (
+            abs(score_win_rate - train_win_rate)
+            if not (pd.isna(score_win_rate) or pd.isna(train_win_rate))
+            else float("nan")
+        )
+        regime_flag = bool(win_rate_gap > 0.10) if not pd.isna(win_rate_gap) else False
+        regime_stats = {
+            "train_win_rate":   train_win_rate,
+            "train_mean_return_mon": train_mean_ret,
+            "score_win_rate":   score_win_rate,
+            "score_mean_return_mon": score_mean_ret,
+            "win_rate_gap":     win_rate_gap,
+            "regime_flag":      regime_flag,
+        }
 
         print(
             f"[INFO] Window {idx}/{len(windows)} "
@@ -540,6 +572,7 @@ def main() -> None:
                 train_rows=train_rows,
                 status=status,
                 previous_window=previous_window,
+                regime_stats=regime_stats,
             )
         )
         persist_summary(summary_rows, summary_csv)
