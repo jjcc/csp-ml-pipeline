@@ -233,7 +233,13 @@ def extract_and_write_symbols(df: pd.DataFrame, output_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Process the dataset for active_process_dataset from config.yaml."""
+    """Process the dataset for active_process_dataset from config.yaml.
+
+    Incremental mode: if the enriched output CSV already exists, only snapshot
+    files whose embedded date is newer than the last captureTime in that CSV are
+    loaded and processed (GEX merge + macro features).  New rows are appended to
+    the existing CSV so previously computed work is never repeated.
+    """
     dataset_cfg = config.get_active_dataset_config()
     if not dataset_cfg:
         raise SystemExit(
@@ -243,11 +249,11 @@ def main() -> None:
 
     print(f"[INFO] Data directory: {dataset_cfg.get('data_dir')}")
 
-    data_dir    = dataset_cfg.get("data_dir", "")
-    basic_csv   = dataset_cfg.get("data_basic_csv", "trades_raw_orig.csv")
+    data_dir     = dataset_cfg.get("data_dir", "")
+    basic_csv    = dataset_cfg.get("data_basic_csv", "trades_raw_orig.csv")
     symbols_file = dataset_cfg.get("tickers_file", "")
-    start_date = dataset_cfg.get("events_start_date", "")
-    end_date = dataset_cfg.get("events_end_date", "")
+    start_date   = dataset_cfg.get("events_start_date", "")
+    end_date     = dataset_cfg.get("events_end_date", "")
 
     if not data_dir:
         raise SystemExit("data_dir not specified in dataset configuration.")
@@ -261,12 +267,47 @@ def main() -> None:
     if not base_dir:
         raise SystemExit("GEX_BASE_DIR is not set in config.yaml or .env")
 
-    vix_csv    = getenv("MACRO_VIX_CSV", "").strip() or None
+    vix_csv     = getenv("MACRO_VIX_CSV", "").strip() or None
     px_base_dir = getenv("MACRO_PX_BASE_DIR", "").strip() or None
 
     os.makedirs(out_dir, exist_ok=True)
-    print("[INFO] Building dataset with features…")
 
+    # ------------------------------------------------------------------
+    # Incremental: find the last snapshot date already in the enriched CSV
+    # so we skip re-loading + re-merging everything that's already done.
+    # ------------------------------------------------------------------
+    derived_macro_name = get_derived_file(basic_csv)[0]
+    enriched_path = os.path.join(out_dir, derived_macro_name) if derived_macro_name else None
+
+    effective_start = start_date or None
+    is_incremental  = False
+    if enriched_path and os.path.isfile(enriched_path):
+        try:
+            ct = pd.read_csv(enriched_path, usecols=["captureTime"])
+            ct["captureTime"] = pd.to_datetime(ct["captureTime"], errors="coerce")
+            last = ct["captureTime"].dt.normalize().max()
+            if pd.notna(last):
+                candidate = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                if effective_start is None or pd.Timestamp(candidate) > pd.Timestamp(effective_start):
+                    effective_start = candidate
+                    is_incremental  = True
+                    print(f"[INFO] Incremental mode: enriched CSV covers up to {last.date()}, "
+                          f"loading new snapshots from {effective_start} onward.")
+        except Exception as exc:
+            print(f"[WARN] Could not inspect existing enriched CSV ({exc}); full rebuild.")
+
+    if is_incremental and end_date and pd.Timestamp(effective_start) > pd.Timestamp(end_date):
+        print(f"[INFO] Already up to date through {end_date}. Nothing to process.")
+        if symbols_file and enriched_path and os.path.isfile(enriched_path):
+            sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"])
+            extract_and_write_symbols(sym_df, symbols_file)
+        return
+
+    print(f"[INFO] Building dataset with features "
+          f"({'incremental' if is_incremental else 'full'})…")
+
+    # Pass out_dir=None so build_dataset_with_features does not write files;
+    # we control writing below to support append mode.
     out = build_dataset_with_features(
         data_dir=data_dir,
         glob_pat=glob_pat,
@@ -275,29 +316,47 @@ def main() -> None:
         gex_target_time=gex_target_time,
         vix_csv=vix_csv,
         px_base_dir=px_base_dir,
-        start_date=start_date or None,
+        start_date=effective_start,
         end_date=end_date or None,
         enforce_daily_pick=False,
         gex_filter_missing=False,
-        out_dir=out_dir,
-        basic_csv_name=basic_csv,
+        out_dir=None,
+        basic_csv_name=None,
         filter_func=filter_by_dte,
     )
     print(json.dumps(out.report, indent=2))
+
+    new_df = out.df
+    if new_df.empty:
+        print("[INFO] No new rows after DTE filter. Enriched CSV unchanged.")
+        if symbols_file and enriched_path and os.path.isfile(enriched_path):
+            sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"])
+            extract_and_write_symbols(sym_df, symbols_file)
+        return
+
+    # Write (fresh) or append (incremental) enriched CSV
+    if is_incremental and enriched_path and os.path.isfile(enriched_path):
+        new_df.to_csv(enriched_path, mode="a", header=False, index=False)
+        print(f"[INFO] Appended {len(new_df):,} new rows → {enriched_path}")
+    else:
+        new_df.to_csv(enriched_path, index=False)
+        print(f"[INFO] Wrote {len(new_df):,} rows → {enriched_path}")
+
+    # Update symbols file from the full (cumulative) enriched dataset
+    if symbols_file:
+        sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"]) if is_incremental else new_df
+        extract_and_write_symbols(sym_df, symbols_file)
+        print("[SUCCESS] Ready for a02_collect_events.py")
+    else:
+        print("[WARN] No tickers_file specified — skipping symbol extraction.")
 
     # Write build log
     ts = pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = Path("log") / f"a01_build_log_{ts}.json"
     log_path.parent.mkdir(exist_ok=True)
     with open(log_path, "w") as f:
-        json.dump(out.report, f, indent=2)
-
-    # Extract symbols for a02_collect_events.py
-    if symbols_file:
-        extract_and_write_symbols(out.df, symbols_file)
-        print(f"[SUCCESS] Ready for a02_collect_events.py")
-    else:
-        print("[WARN] No tickers_file specified — skipping symbol extraction.")
+        json.dump({**out.report, "incremental": is_incremental,
+                   "effective_start": effective_start}, f, indent=2)
 
 
 if __name__ == "__main__":

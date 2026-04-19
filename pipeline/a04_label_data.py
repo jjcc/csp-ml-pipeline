@@ -240,8 +240,13 @@ def load_exclude_symbols() -> set:
 # CSV-level labeling
 # ---------------------------------------------------------------------------
 
-def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date) -> None:
-    """Label *df* and write to output/data_labeled/<output_csv>."""
+def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date,
+                   append: bool = False) -> None:
+    """Label *df* and write (or append) to output/data_labeled/<output_csv>.
+
+    append=True is used in incremental mode: new rows are appended to the
+    existing labeled CSV instead of overwriting it.
+    """
     df["expirationDate"] = pd.to_datetime(df["expirationDate"], errors="coerce")
     cut_off_date         = pd.to_datetime(cut_off_date).normalize()
 
@@ -278,10 +283,15 @@ def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date) -> None:
     print(f"  label_coverage={len(labeled)/max(len(df),1):.2%}  "
           f"win_rate={labeled['won'].mean():.2%}")
 
-    out_dir = os.path.join(getenv("COMMON_OUTPUT_DIR", "./output"), "data_labeled")
+    out_dir  = os.path.join(getenv("COMMON_OUTPUT_DIR", "./output"), "data_labeled")
+    out_path = os.path.join(out_dir, output_csv)
     os.makedirs(out_dir, exist_ok=True)
-    labeled.to_csv(os.path.join(out_dir, output_csv), index=False)
-    print(f"  → {out_dir}/{output_csv}")
+    if append and os.path.isfile(out_path):
+        labeled.to_csv(out_path, mode="a", header=False, index=False)
+        print(f"  → appended {len(labeled):,} rows → {out_path}")
+    else:
+        labeled.to_csv(out_path, index=False)
+        print(f"  → {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +361,34 @@ def label_single_dataset() -> None:
     if len(df) != before:
         print(f"  Excluded {before - len(df)} rows from known bad symbols.")
 
-    label_csv_file(df, output_csv, cutoff_date)
+    # ------------------------------------------------------------------
+    # Incremental: skip trade dates already present in the labeled CSV.
+    # Only new rows (tradeTime after the last labeled date) are processed
+    # and appended, so yfinance fetches and labeling work only on new data.
+    # ------------------------------------------------------------------
+    out_dir      = os.path.join(getenv("COMMON_OUTPUT_DIR", "./output"), "data_labeled")
+    labeled_path = os.path.join(out_dir, output_csv)
+    append_mode  = False
+    if os.path.isfile(labeled_path):
+        try:
+            existing = pd.read_csv(labeled_path, usecols=["tradeTime"])
+            existing["tradeTime"] = pd.to_datetime(existing["tradeTime"], errors="coerce")
+            last_labeled = existing["tradeTime"].dt.normalize().max()
+            if pd.notna(last_labeled):
+                df["tradeTime"] = pd.to_datetime(df["tradeTime"], errors="coerce")
+                new_mask = df["tradeTime"].dt.normalize() > last_labeled
+                n_new = new_mask.sum()
+                if n_new == 0:
+                    print(f"[INFO] Labeled CSV already covers up to {last_labeled.date()}. Nothing to do.")
+                    return
+                df = df[new_mask].copy()
+                append_mode = True
+                print(f"[INFO] Incremental: labeled CSV covers up to {last_labeled.date()}, "
+                      f"labeling {n_new:,} new rows.")
+        except Exception as exc:
+            print(f"[WARN] Could not inspect existing labeled CSV ({exc}); full relabel.")
+
+    label_csv_file(df, output_csv, cutoff_date, append=append_mode)
 
 
 # ---------------------------------------------------------------------------
