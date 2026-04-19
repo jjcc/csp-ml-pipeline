@@ -94,7 +94,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-date",
         default=None,
-        help="Oldest trade date to include when building score windows (YYYY-MM-DD).",
+        help="Oldest usable history date (YYYY-MM-DD). This is not the first "
+             "score window date; the first score window starts after the rolling "
+             "warm-up period.",
     )
     parser.add_argument(
         "--end-date",
@@ -376,7 +378,7 @@ def main() -> None:
         )
     )
 
-    start_date = pd.Timestamp(
+    history_start_date = pd.Timestamp(
         _coalesce_str(args.start_date, "BACKFILL_START_DATE", "2025-04-25")
     ).normalize()
     end_date_raw = _coalesce_str(args.end_date, "BACKFILL_END_DATE", "")
@@ -395,12 +397,13 @@ def main() -> None:
     backfill_dir = PROJECT_ROOT / output_dir / "backfill"
     config_dir = backfill_dir / "configs"
     summary_csv = backfill_dir / "rolling_window_summary.csv"
+    first_score_candidate = history_start_date + timedelta(weeks=rolling_weeks)
 
     if not skip_prep:
         prep_cfg = build_prep_config(
             base_cfg=base_cfg,
-            overall_start=start_date,
-            overall_end=end_date if end_date is not None else start_date,
+            overall_start=history_start_date,
+            overall_end=end_date if end_date is not None else history_start_date,
         )
         # If no explicit end date was provided, infer it from available option filenames by
         # reading the latest labeled date after prep.  For the initial prep pass, widen to
@@ -439,7 +442,7 @@ def main() -> None:
     trade_dates = sorted(pd.Series(labeled_df["trade_date"].unique()).tolist())
     windows = build_score_windows(
         trade_dates=trade_dates,
-        start_date=start_date,
+        start_date=first_score_candidate,
         end_date=end_date,
         window_trade_days=score_window_trade_days,
         drop_partial_last_window=drop_partial_last_window,
@@ -449,7 +452,9 @@ def main() -> None:
         raise SystemExit("No score windows were generated. Check the date range and labeled CSV.")
 
     print(
-        f"[INFO] Generated {len(windows)} score windows "
+        f"[INFO] History start={history_start_date.date()} | "
+        f"first score candidate={first_score_candidate.date()} | "
+        f"generated {len(windows)} score windows "
         f"({score_window_trade_days} trade days each, rolling_weeks={rolling_weeks})."
     )
 
