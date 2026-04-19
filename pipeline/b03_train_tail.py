@@ -13,8 +13,9 @@ Architecture dependency:
   probabilities (p_bin0-3) as features alongside the standard market features.
 
 Labeling:
-  tail = 1  when  y_true == 0  (actual return fell in worst quartile / bin-0)
-  This targets catastrophic losers regardless of what the winner model predicted.
+  tail = 1  when  return_mon <= quantile(return_mon, tail_k)
+  tail_k defaults to 0.05 (worst 5% by absolute monthly return).
+  This targets catastrophic absolute losers regardless of daily rank.
 
 High tail_proba => "likely a catastrophic loser — do not enter this trade."
 
@@ -73,6 +74,9 @@ class TailClassifierConfig:
         self.with_earnings = str(getenv("TAIL_WITH_EARNINGS", "1")).lower() in {
             "1", "true", "yes", "y", "on"
         }
+        # Worst-k% absolute quantile cut on return_mon.
+        # tail = 1 when return_mon <= quantile(return_mon, tail_k).
+        self.tail_k = float(getenv("TAIL_TAIL_K", "0.05"))
 
         if not self.winner_oof_csv:
             raise SystemExit(
@@ -260,12 +264,21 @@ def main() -> None:
     # ── Feature prep (adds conflict_score, extends with earnings if needed) ──
     feat_list, df = build_features(df, cfg.with_earnings)
 
-    # ── Tail labels: y_true == 0  (actual worst quartile / bin-0) ───────────
-    y = (df["y_true"] == 0).astype(int).values
+    # ── Tail labels: worst-k% by return_mon (absolute quantile cut) ─────────
+    # tail = 1 when return_mon <= quantile(return_mon, tail_k).
+    # The cut is computed on the training window so no future data leaks in.
+    if "return_mon" not in df.columns:
+        raise SystemExit(
+            "[ERROR] 'return_mon' column not found in training data. "
+            "Ensure a04_label_data.py has run and the merged CSV contains return_mon."
+        )
+    tail_cut  = float(df["return_mon"].quantile(cfg.tail_k))
+    y         = (df["return_mon"] <= tail_cut).astype(int).values
     tail_n    = int(y.sum())
     total_n   = len(y)
     tail_rate = float(y.mean())
-    print(f"\n[INFO] Tail labels: {tail_n}/{total_n} ({tail_rate:.1%} tail)")
+    print(f"\n[INFO] Tail labels (worst {cfg.tail_k:.0%} by return_mon): "
+          f"cut={tail_cut:.4f}  {tail_n}/{total_n} ({tail_rate:.1%} tail)")
 
     # ── Toxic trade analysis (pred=bin-3 but true=bin-0) ─────────────────────
     mask_pred3 = df["y_pred"] == 3
@@ -381,6 +394,8 @@ def main() -> None:
     # ── Metrics JSON ─────────────────────────────────────────────────────────
     write_tail_metrics(out_dir, {"auc_roc": oof_auc, "auc_prc": oof_ap}, extra={
         "rows":               total_n,
+        "tail_k":             cfg.tail_k,
+        "tail_cut_return_mon": round(tail_cut, 6),
         "tail_n":             tail_n,
         "tail_rate":          round(tail_rate, 4),
         "oof_best_threshold": round(best_thr, 6),

@@ -16,7 +16,7 @@
 # See CLAUDE.md → "Rolling Window Design" for the full workflow.
 # ============================================================
 
-rolling_window_weeks:   14            # Training window in weeks (try 16 for more data)
+rolling_window_weeks:   16            # Training window in weeks (try 16 for more data)
 
 # ============================================================
 # Single dataset — all option data in one folder, no sub-folders
@@ -176,6 +176,10 @@ tail:
 
   model_name:    "tail_classifier_model"   # suffix _{date}.pkl added by b03
   with_earnings: 1    # 1 = include is_earnings_week / is_earnings_window if present
+  # Worst-k% absolute quantile cut on return_mon.
+  # tail = 1 when return_mon <= quantile(return_mon, tail_k).
+  # Try 0.10 if 0.05 produces too few tail examples.
+  tail_k:        0.05
 
 # ============================================================
 # Tail Loss Classifier scoring  (b04_score_tail.py)
