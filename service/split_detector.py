@@ -147,11 +147,14 @@ def fetch_splits_yfinance(
 
             # Filter by date range if provided
             if start_dt or end_dt:
+                idx_tz = splits.index.tzinfo
                 mask = pd.Series([True] * len(splits), index=splits.index)
                 if start_dt:
-                    mask &= (splits.index >= start_dt)
+                    cmp = start_dt.tz_localize(idx_tz) if idx_tz and start_dt.tzinfo is None else start_dt
+                    mask &= (splits.index >= cmp)
                 if end_dt:
-                    mask &= (splits.index <= end_dt)
+                    cmp = end_dt.tz_localize(idx_tz) if idx_tz and end_dt.tzinfo is None else end_dt
+                    mask &= (splits.index <= cmp)
                 splits = splits[mask]
 
             for split_date, split_factor in splits.items():

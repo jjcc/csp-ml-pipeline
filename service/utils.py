@@ -38,7 +38,9 @@ from service.constants import BASE_FEATS, GEX_FEATS, NEW_FEATS, ALL_FEATS, DEFAU
 
 # ---- Existing helpers kept minimal to avoid conflicts ----
 def ensure_dir(path: str) -> str:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    p = Path(path)
+    target = p if not p.suffix else p.parent
+    target.mkdir(parents=True, exist_ok=True)
     return path
 
 def load_env_default() -> None:
