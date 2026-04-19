@@ -316,10 +316,13 @@ def collect_summary_row(
     output_dir: str,
     rolling_weeks: int,
     window: ScoreWindow,
+    train_start: pd.Timestamp,
+    train_end: pd.Timestamp,
     score_csv: Path,
     score_rows: int,
     train_rows: int,
     status: str,
+    previous_window: ScoreWindow | None,
 ) -> dict[str, Any]:
     tag = window.tag
     paths = window_output_paths(output_dir, rolling_weeks, tag)
@@ -329,14 +332,19 @@ def collect_summary_row(
     tail_score = load_json_if_exists(paths["tail_score_dir"] / f"tail_scores_{tag}.json")
 
     row: dict[str, Any] = {
+        "train_start": train_start.strftime("%Y-%m-%d"),
+        "train_end": train_end.strftime("%Y-%m-%d"),
         "window_start": window.start.strftime("%Y-%m-%d"),
         "window_end": window.end.strftime("%Y-%m-%d"),
         "window_tag": tag,
+        "train_history_weeks": rolling_weeks,
         "trade_days_in_window": len(window.trade_dates),
         "score_rows": score_rows,
         "train_rows": train_rows,
         "status": status,
         "score_input_csv": relative_to_project(score_csv),
+        "previous_window_tag": previous_window.tag if previous_window is not None else "",
+        "previous_window_score_included": previous_window is not None,
     }
 
     def merge_prefixed(prefix: str, data: dict[str, Any]) -> None:
@@ -465,8 +473,10 @@ def main() -> None:
         score_rows = write_score_window_csv(labeled_df, window, score_csv)
 
         train_start = window.start - timedelta(weeks=rolling_weeks)
+        train_end = window.start - pd.Timedelta(days=1)
         train_mask = (labeled_df["trade_date"] >= train_start) & (labeled_df["trade_date"] < window.start)
         train_rows = int(train_mask.sum())
+        previous_window = windows[idx - 2] if idx > 1 else None
 
         print(
             f"[INFO] Window {idx}/{len(windows)} "
@@ -523,10 +533,13 @@ def main() -> None:
                 output_dir=output_dir,
                 rolling_weeks=rolling_weeks,
                 window=window,
+                train_start=train_start,
+                train_end=train_end,
                 score_csv=score_csv,
                 score_rows=score_rows,
                 train_rows=train_rows,
                 status=status,
+                previous_window=previous_window,
             )
         )
         persist_summary(summary_rows, summary_csv)

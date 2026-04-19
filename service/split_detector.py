@@ -19,6 +19,10 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 
+from dotenv import load_dotenv
+
+from service.constants import DEFAULT_SLEEP_SECONDS
+
 
 def detect_splits_from_prices(
     price_df: pd.DataFrame,
@@ -110,7 +114,7 @@ def detect_splits_from_prices(
 def fetch_splits_yfinance(
     symbols: List[str],
     date_range: Optional[Tuple[str, str]] = None,
-    sleep_seconds: float = 0.1
+    sleep_seconds: float = DEFAULT_SLEEP_SECONDS
 ) -> pd.DataFrame:
     """
     Fetch stock split history directly from yfinance API.
@@ -126,6 +130,8 @@ def fetch_splits_yfinance(
         DataFrame with columns: symbol, date, split_factor, split_ratio
     """
     all_splits = []
+    load_dotenv(override=False)
+    sleep_seconds = float(os.getenv("YF_SPLIT_SLEEP_SECONDS", str(sleep_seconds)))
 
     start_dt = pd.to_datetime(date_range[0]) if date_range else None
     end_dt = pd.to_datetime(date_range[1]) if date_range else None

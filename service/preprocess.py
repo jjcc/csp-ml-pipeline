@@ -22,6 +22,26 @@ def parse_timestamp_from_filename(name: str):
     t = dt.time(int(m.group(2)), int(m.group(3)))
     return d, t
 
+
+def filter_snapshot_paths_by_date(paths, start_date=None, end_date=None):
+    """Keep only snapshot paths whose embedded filename date falls in range."""
+    if start_date is None and end_date is None:
+        return sorted(paths)
+
+    start = pd.Timestamp(start_date).date() if start_date is not None else None
+    end = pd.Timestamp(end_date).date() if end_date is not None else None
+    keep = []
+    for p in paths:
+        d, _ = parse_timestamp_from_filename(os.path.basename(str(p)))
+        if d is None:
+            continue
+        if start is not None and d < start:
+            continue
+        if end is not None and d > end:
+            continue
+        keep.append(str(Path(p)))
+    return sorted(keep)
+
 def pick_daily_snapshot_files(data_dir: str, pattern: str, target_time_str: str = "11:00"):
     """
     Groups files by date and picks one file per date:
@@ -96,12 +116,21 @@ def keep_one_row_per_contract_per_day(
     return df.drop(columns=["_tod_min", "_time_diff", "_date"], errors="ignore")
 
 
-def load_csp_files(data_dir: str, pattern: str, target_time="11:00", enforce_daily_pick=True, cut_off_date=None) -> pd.DataFrame:
+def load_csp_files(
+    data_dir: str,
+    pattern: str,
+    target_time="11:00",
+    enforce_daily_pick=True,
+    cut_off_date=None,
+    start_date=None,
+    end_date=None,
+) -> pd.DataFrame:
     if enforce_daily_pick:
         paths = pick_daily_snapshot_files(data_dir, pattern, target_time)
     else:
         import glob, os
         paths = sorted(glob.glob(os.path.join(data_dir, pattern)))
+    paths = filter_snapshot_paths_by_date(paths, start_date=start_date, end_date=end_date)
     frames = []
     for idx, p in enumerate(paths):
         try:

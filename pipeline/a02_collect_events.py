@@ -463,10 +463,11 @@ def main() -> None:
     if collect_splits:
         print(f"\n[2/2] Collecting stock splits from yfinance...")
         try:
+            split_sleep = float(os.getenv("YF_SPLIT_SLEEP_SECONDS", "1.0"))
             split_df = fetch_splits_yfinance(
                 symbols=tickers,
                 date_range=(start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')),
-                sleep_seconds=0.1
+                sleep_seconds=split_sleep
             )
             print(f"Found {len(split_df)} stock splits")
 

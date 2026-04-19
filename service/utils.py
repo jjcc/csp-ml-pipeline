@@ -251,6 +251,11 @@ def download_prices_batched(symbols, start_dt, end_dt, batch_size=30, threads=Tr
     """
     import yfinance as yf
     import math
+    load_dotenv(override=False)
+    sleep_seconds = float(os.getenv("YF_HISTORY_SLEEP_SECONDS", str(DEFAULT_SLEEP_SECONDS)))
+    threads_override = os.getenv("YF_HISTORY_THREADS", "").strip().lower()
+    if threads_override:
+        threads = threads_override in {"1", "true", "yes", "y", "on"}
     symbols = sorted(set([s for s in symbols if isinstance(s, str) and len(s)>0]))
     symbols = [s if "." not in s else s.replace(".", "-") for s in symbols]  # ensure uppercase
     out = {}
@@ -278,5 +283,6 @@ def download_prices_batched(symbols, start_dt, end_dt, batch_size=30, threads=Tr
                 out[batch[0]] = df
         except Exception as e:
             print(f"[WARN] batch download failed for {batch}: {e}")
-        sleep(DEFAULT_SLEEP_SECONDS)  # Magic numbers replaced by constants
+        if sleep_seconds > 0 and i + batch_size < len(symbols):
+            sleep(sleep_seconds)
     return out

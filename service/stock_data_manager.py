@@ -1,9 +1,14 @@
 import os
 import yfinance as yf
 import pandas as pd
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
+
+from dotenv import load_dotenv
+
+from service.constants import DEFAULT_SLEEP_SECONDS
 
 class GroupedStockUpdater:
     def __init__(self, data_dir='stock_data', log_file='stock_log.csv'):
@@ -32,6 +37,10 @@ class GroupedStockUpdater:
         """
         from service.data_prepare import _load_cached_price_data
         from service.env_config import getenv
+        load_dotenv(override=False)
+        history_sleep_seconds = float(os.getenv("YF_HISTORY_SLEEP_SECONDS", str(DEFAULT_SLEEP_SECONDS)))
+        threads_override = os.getenv("YF_HISTORY_THREADS", "").strip().lower()
+        use_threads = threads_override in {"1", "true", "yes", "y", "on"} if threads_override else True
         if target_end_date is None:
             target_end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         # Add 1 day to end_date for yfinance API call
@@ -64,8 +73,10 @@ class GroupedStockUpdater:
         if groups['new']:
             print(f"\n[1/2] Downloading {len(groups['new'])} new symbols...")
             #self._download_group(groups['new'], '2024-04-01', target_end_date)
-            res = self._download_group(groups['new'], '2024-04-01', yf_end_date)
+            res = self._download_group(groups['new'], '2024-04-01', yf_end_date, use_threads=use_threads)
             price_info.update(res)
+            if history_sleep_seconds > 0 and groups['updates']:
+                time.sleep(history_sleep_seconds)
 
         # Download updates grouped by end_date
         if groups['updates']:
@@ -82,9 +93,13 @@ class GroupedStockUpdater:
                       f"({end_date} -> {target_end_date})")
 
                 #self._download_and_append(syms, start_date, target_end_date, end_date)
-                prices = self._download_and_append(syms, start_date, yf_end_date, end_date)
+                prices = self._download_and_append(
+                    syms, start_date, yf_end_date, end_date, use_threads=use_threads
+                )
                 price_info.update(prices)
                 total_updated += len(syms)
+                if history_sleep_seconds > 0 and idx < len(groups['updates']):
+                    time.sleep(history_sleep_seconds)
         if groups['current']:
             out_dir = getenv("COMMON_OUTPUT_DIR", "./output")
             cache_dir = os.path.join(out_dir, "price_cache")
@@ -129,12 +144,12 @@ class GroupedStockUpdater:
             'current': current_symbols
         }
 
-    def _download_group(self, symbols, start_date, end_date):
+    def _download_group(self, symbols, start_date, end_date, use_threads=True):
         """Download full history for a group of symbols"""
         try:
             # Batch download (much faster)
             data = yf.download(symbols, start=start_date, end=end_date,
-                             group_by='ticker', threads=True, progress=True)
+                             group_by='ticker', threads=use_threads, progress=True)
             price_info = {}
             # Save each symbol
             for symbol in symbols:
@@ -167,12 +182,12 @@ class GroupedStockUpdater:
             print(f"Error downloading group: {e}")
             return {}
 
-    def _download_and_append(self, symbols, start_date, end_date, current_end_date):
+    def _download_and_append(self, symbols, start_date, end_date, current_end_date, use_threads=True):
         """Download incremental data and append to existing files"""
         try:
             # Batch download incremental data
             new_data = yf.download(symbols, start=start_date, end=end_date,
-                                  group_by='ticker', threads=True, progress=False)
+                                  group_by='ticker', threads=use_threads, progress=False)
             price_info = {}
             # Append to each symbol's file
             for symbol in symbols:

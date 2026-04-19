@@ -72,6 +72,8 @@ def build_dataset_with_features(
     gex_target_time: str = "11:00",
     vix_csv: Optional[str] = None,
     px_base_dir: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     *,
     enforce_daily_pick: bool = True,
     gex_filter_missing: bool = False,
@@ -136,6 +138,8 @@ def build_dataset_with_features(
         glob_pat,
         target_time=target_time,
         enforce_daily_pick=enforce_daily_pick,
+        start_date=start_date,
+        end_date=end_date,
     )
     if filter_func:
         raw = filter_func(raw)
@@ -242,6 +246,8 @@ def main() -> None:
     data_dir    = dataset_cfg.get("data_dir", "")
     basic_csv   = dataset_cfg.get("data_basic_csv", "trades_raw_orig.csv")
     symbols_file = dataset_cfg.get("tickers_file", "")
+    start_date = dataset_cfg.get("events_start_date", "")
+    end_date = dataset_cfg.get("events_end_date", "")
 
     if not data_dir:
         raise SystemExit("data_dir not specified in dataset configuration.")
@@ -269,6 +275,8 @@ def main() -> None:
         gex_target_time=gex_target_time,
         vix_csv=vix_csv,
         px_base_dir=px_base_dir,
+        start_date=start_date or None,
+        end_date=end_date or None,
         enforce_daily_pick=False,
         gex_filter_missing=False,
         out_dir=out_dir,
