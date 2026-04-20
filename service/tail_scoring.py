@@ -134,7 +134,7 @@ def fill_features(df: pd.DataFrame, feat_list: list,
                 med = float(med_val) if pd.notna(med_val) else 0.0
             computed_medians[col] = med
             Xdf[col] = Xdf[col].fillna(med)
-    return Xdf[feat_list].astype(float).values, computed_medians
+    return Xdf[feat_list].astype(float), computed_medians
 
 
 # ---------------------------------------------------------------------------

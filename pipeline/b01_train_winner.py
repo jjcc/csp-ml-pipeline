@@ -318,11 +318,12 @@ class ModelFactory:
         if cfg.model_type == "lgbm":
             from lightgbm import LGBMClassifier
             return LGBMClassifier(
-                n_estimators      = int(os.getenv("LGBM_N_ESTIMATORS",      "2000")),
+                n_estimators      = int(os.getenv("LGBM_N_ESTIMATORS",      "1000")),
                 learning_rate     = float(os.getenv("LGBM_LR",               "0.05")),
-                num_leaves        = int(os.getenv("LGBM_NUM_LEAVES",         "63")),
+                num_leaves        = int(os.getenv("LGBM_NUM_LEAVES",         "42")),
                 max_depth         = int(os.getenv("LGBM_MAX_DEPTH",          "-1")),
-                min_child_samples = int(os.getenv("LGBM_MIN_CHILD",          "80")),
+                min_child_samples = int(os.getenv("LGBM_MIN_CHILD",          "30")),
+                min_split_gain    = float(os.getenv("LGBM_MIN_SPLIT_GAIN",   "0.001")),
                 subsample         = float(os.getenv("LGBM_BAGGING_FRACTION", "1.0")),
                 subsample_freq    = int(os.getenv("LGBM_BAGGING_FREQ",       "0")),
                 colsample_bytree  = float(os.getenv("LGBM_FEATURE_FRACTION", "0.8")),

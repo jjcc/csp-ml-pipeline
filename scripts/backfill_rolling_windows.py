@@ -398,7 +398,7 @@ def main() -> None:
     )
 
     history_start_date = pd.Timestamp(
-        _coalesce_str(args.start_date, "BACKFILL_START_DATE", "2025-04-25")
+        _coalesce_str(args.start_date, "BACKFILL_START_DATE", "2025-04-28")
     ).normalize()
     end_date_raw = _coalesce_str(args.end_date, "BACKFILL_END_DATE", "")
     end_date = pd.Timestamp(end_date_raw).normalize() if end_date_raw else None

@@ -190,7 +190,7 @@ def find_best_f1_threshold(y: np.ndarray, proba: np.ndarray) -> float:
 # OOF cross-validation (reuse winner fold structure)
 # ---------------------------------------------------------------------------
 
-def run_oof(df: pd.DataFrame, X: np.ndarray,
+def run_oof(df: pd.DataFrame, X: pd.DataFrame,
             y: np.ndarray) -> tuple[np.ndarray, list]:
     """Run OOF CV by reusing the winner model's fold column.
 

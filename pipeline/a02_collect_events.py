@@ -330,7 +330,7 @@ def write_unified_csv(events: List[UnifiedEvent], out_path: str) -> None:
             ])
 
 TICKER_MAP = { "AMBC":"OSG", "ZI":"GTM", "BTCM":"SLAI", "BYON":"BBBY", "FI":"FISV" ,"BRK.B":"BRK-B"}
-TICKER_REMOVE = ["PARA","VRNA","FL","LAZR"]
+TICKER_REMOVE = ["PARA","VRNA","FL","LAZR", "SWTX", "SRM", "X", "WBA", "IGT", "HES", "RGLS", "JNPR"]
 
 def map_ticker(ticker: str) -> Optional[str]:
     t = ticker.upper().strip()
@@ -467,8 +467,11 @@ def main() -> None:
         print(f"\n[2/2] Collecting stock splits from yfinance...")
         try:
             split_sleep = float(os.getenv("YF_SPLIT_SLEEP_SECONDS", "1.0"))
+            tickers2 = [ map_ticker(t) if t in special_tickers else t for t in tickers ]
+            tickers2 = [t for t in tickers2 if t]
+
             split_df = fetch_splits_yfinance(
-                symbols=tickers,
+                symbols=tickers2,
                 date_range=(start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')),
                 sleep_seconds=split_sleep
             )
