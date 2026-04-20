@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service.env_config import config, getenv
 from service.constants import MAX_DAYS_TO_EXPIRATION
+from service.table_store import read_table, resolve_read_path, table_exists
 
 
 def main() -> None:
@@ -69,20 +70,21 @@ def main() -> None:
     window_start = score_start - timedelta(weeks=window_weeks)
 
     labeled_path = os.path.join(labeled_dir, output_csv)
-    if not os.path.isfile(labeled_path):
+    if not table_exists(labeled_path):
         print(
-            f"[ERROR] Labeled CSV not found: {labeled_path}\n"
+            f"[ERROR] Labeled dataset not found: {labeled_path}\n"
             f"  Run a01 → a04 first to produce the labeled dataset."
         )
         sys.exit(1)
 
-    print(f"Loading labeled data: {labeled_path}")
-    df = pd.read_csv(labeled_path)
-    print(f"  Total rows in labeled CSV: {len(df):,}")
+    actual_labeled_path = resolve_read_path(labeled_path)
+    print(f"Loading labeled data: {actual_labeled_path}")
+    df = read_table(labeled_path)
+    print(f"  Total rows in labeled dataset: {len(df):,}")
 
     # --- Date-filter to rolling training window ---
     if "tradeTime" not in df.columns:
-        print("[ERROR] 'tradeTime' column not found in labeled CSV.")
+        print("[ERROR] 'tradeTime' column not found in labeled dataset.")
         sys.exit(1)
 
     tt = pd.to_datetime(df["tradeTime"], errors="coerce")
@@ -97,7 +99,7 @@ def main() -> None:
     if train.empty:
         print(
             "[ERROR] No training rows found in the rolling window.\n"
-            "  Check that dataset.events_start_date is correct and that the labeled CSV\n"
+            "  Check that dataset.events_start_date is correct and that the labeled dataset\n"
             "  contains trades from the preceding period."
         )
         sys.exit(1)

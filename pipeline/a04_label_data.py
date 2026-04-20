@@ -39,6 +39,7 @@ except Exception:
 
 from service.data_prepare import derive_capital, preload_prices_with_cache
 from service.env_config import get_derived_file, getenv
+from service.table_store import read_table, table_exists, write_table
 
 # ---------------------------------------------------------------------------
 # Paths (absolute, robust to CWD changes)
@@ -245,7 +246,7 @@ def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date,
     """Label *df* and write (or append) to output/data_labeled/<output_csv>.
 
     append=True is used in incremental mode: new rows are appended to the
-    existing labeled CSV instead of overwriting it.
+    existing labeled parquet history instead of overwriting it.
     """
     df["expirationDate"] = pd.to_datetime(df["expirationDate"], errors="coerce")
     cut_off_date         = pd.to_datetime(cut_off_date).normalize()
@@ -285,13 +286,11 @@ def label_csv_file(df: pd.DataFrame, output_csv: str, cut_off_date,
 
     out_dir  = os.path.join(getenv("COMMON_OUTPUT_DIR", "./output"), "data_labeled")
     out_path = os.path.join(out_dir, output_csv)
-    os.makedirs(out_dir, exist_ok=True)
-    if append and os.path.isfile(out_path):
-        labeled.to_csv(out_path, mode="a", header=False, index=False)
-        print(f"  → appended {len(labeled):,} rows → {out_path}")
+    stored_path = write_table(labeled, out_path, append=append, index=False)
+    if append and table_exists(out_path):
+        print(f"  → appended {len(labeled):,} rows → {stored_path}")
     else:
-        labeled.to_csv(out_path, index=False)
-        print(f"  → {out_path}")
+        print(f"  → {stored_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +305,7 @@ def label_single_dataset() -> None:
     file is not found (with a warning), so the step can still run if a02/a03
     were skipped for testing purposes.
 
-    Writes the labeled CSV to output/data_labeled/<dataset.output_csv>.
+    Writes the labeled dataset to output/data_labeled/<dataset.output_csv>.
     """
     from service.env_config import config, get_derived_file
 
@@ -328,10 +327,10 @@ def label_single_dataset() -> None:
 
     # Prefer the filtered output from a03 (corporate-event filtering applied).
     # Fall back to the enriched macro CSV only if filtered file is absent.
-    if filtered_csv and os.path.isfile(filtered_csv):
+    if filtered_csv and table_exists(filtered_csv):
         fpath = filtered_csv
         print(f"\nProcessing (filtered): {filtered_csv}")
-        df = pd.read_csv(fpath)
+        df = read_table(fpath)
     else:
         if filtered_csv:
             print(
@@ -347,13 +346,13 @@ def label_single_dataset() -> None:
             )
         input_dir = os.path.join(getenv("COMMON_OUTPUT_DIR", "output"), "data_prep")
         fpath     = os.path.join(input_dir, macro_csv)
-        if not os.path.isfile(fpath):
+        if not table_exists(fpath):
             raise SystemExit(
-                f"Enriched CSV not found: {fpath}\n"
+                f"Enriched dataset not found: {fpath}\n"
                 f"  Run a01_build_features.py first."
             )
         print(f"\nProcessing (unfiltered): {macro_csv}")
-        df = pd.read_csv(fpath, index_col="row_id")
+        df = read_table(fpath, index_col="row_id")
 
     exclude = load_exclude_symbols()
     before  = len(df)
@@ -362,16 +361,16 @@ def label_single_dataset() -> None:
         print(f"  Excluded {before - len(df)} rows from known bad symbols.")
 
     # ------------------------------------------------------------------
-    # Incremental: skip trade dates already present in the labeled CSV.
+    # Incremental: skip trade dates already present in the labeled dataset.
     # Only new rows (tradeTime after the last labeled date) are processed
     # and appended, so yfinance fetches and labeling work only on new data.
     # ------------------------------------------------------------------
     out_dir      = os.path.join(getenv("COMMON_OUTPUT_DIR", "./output"), "data_labeled")
     labeled_path = os.path.join(out_dir, output_csv)
     append_mode  = False
-    if os.path.isfile(labeled_path):
+    if table_exists(labeled_path):
         try:
-            existing = pd.read_csv(labeled_path, usecols=["tradeTime"])
+            existing = read_table(labeled_path, columns=["tradeTime"])
             existing["tradeTime"] = pd.to_datetime(existing["tradeTime"], errors="coerce")
             last_labeled = existing["tradeTime"].dt.normalize().max()
             if pd.notna(last_labeled):
@@ -379,14 +378,14 @@ def label_single_dataset() -> None:
                 new_mask = df["tradeTime"].dt.normalize() > last_labeled
                 n_new = new_mask.sum()
                 if n_new == 0:
-                    print(f"[INFO] Labeled CSV already covers up to {last_labeled.date()}. Nothing to do.")
+                    print(f"[INFO] Labeled dataset already covers up to {last_labeled.date()}. Nothing to do.")
                     return
                 df = df[new_mask].copy()
                 append_mode = True
-                print(f"[INFO] Incremental: labeled CSV covers up to {last_labeled.date()}, "
+                print(f"[INFO] Incremental: labeled dataset covers up to {last_labeled.date()}, "
                       f"labeling {n_new:,} new rows.")
         except Exception as exc:
-            print(f"[WARN] Could not inspect existing labeled CSV ({exc}); full relabel.")
+            print(f"[WARN] Could not inspect existing labeled dataset ({exc}); full relabel.")
 
     label_csv_file(df, output_csv, cutoff_date, append=append_mode)
 

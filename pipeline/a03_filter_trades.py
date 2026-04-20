@@ -18,6 +18,8 @@ import numpy as np
 # Ensure project root is on path when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from service.table_store import read_table, table_exists, write_table
+
 
 @dataclass
 class ExclusionWindow:
@@ -100,9 +102,9 @@ def load_config(config_path: str = "corp_action_config.yaml") -> FilterConfig:
 
 
 def load_trades(csv_path: str, symbol_col: str, trade_date_col: str, expiry_col: str) -> pd.DataFrame:
-    """Load and prepare trades CSV"""
+    """Load and prepare trades history."""
     print(f"Loading trades from {csv_path}...")
-    df = pd.read_csv(csv_path)
+    df = read_table(csv_path)
 
     # Ensure required columns exist
     if symbol_col not in df.columns:
@@ -401,19 +403,19 @@ def main():
     # in the filtered output so GEX-merged rows are never re-filtered.
     # ------------------------------------------------------------------
     last_filtered_date = None
-    if os.path.isfile(config.output_csv):
+    if table_exists(config.output_csv):
         try:
-            existing = pd.read_csv(config.output_csv, usecols=[config.trade_date_col])
+            existing = read_table(config.output_csv, columns=[config.trade_date_col])
             existing[config.trade_date_col] = pd.to_datetime(
                 existing[config.trade_date_col], errors="coerce"
             )
             last_ts = existing[config.trade_date_col].max()
             if pd.notna(last_ts):
                 last_filtered_date = pd.Timestamp(last_ts).normalize()
-                print(f"[INFO] Incremental: filtered CSV covers up to {last_filtered_date.date()}, "
+                print(f"[INFO] Incremental: filtered dataset covers up to {last_filtered_date.date()}, "
                       f"processing newer rows only.")
         except Exception as exc:
-            print(f"[WARN] Could not inspect existing filtered CSV ({exc}); full refilter.")
+            print(f"[WARN] Could not inspect existing filtered dataset ({exc}); full refilter.")
 
     # Load data
     trades_df = load_trades(
@@ -429,7 +431,7 @@ def main():
         trades_df[col] = pd.to_datetime(trades_df[col], errors="coerce")
         trades_df = trades_df[trades_df[col].dt.normalize() > last_filtered_date].copy()
         if trades_df.empty:
-            print("[INFO] No new trades to filter. Filtered CSV is already up to date.")
+            print("[INFO] No new trades to filter. Filtered dataset is already up to date.")
             return
 
     events_df = load_events(config.events_csv)
@@ -481,21 +483,19 @@ def main():
                             "days_before", "days_after"]]
     kept_df = kept_df.drop(columns=cols_to_drop)
 
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(config.output_csv) or ".", exist_ok=True)
-    write_mode   = "a" if last_filtered_date is not None and os.path.isfile(config.output_csv) else "w"
-    write_header = (write_mode == "w")
-    kept_df.to_csv(config.output_csv, mode=write_mode, header=write_header, index=False)
-    print(f"  {'Appended' if write_mode == 'a' else 'Saved'} "
-          f"{len(kept_df):,} filtered trades → {config.output_csv}")
+    append_output = last_filtered_date is not None and table_exists(config.output_csv)
+    stored_output = write_table(kept_df, config.output_csv, append=append_output, index=False)
+    print(f"  {'Appended' if append_output else 'Saved'} "
+          f"{len(kept_df):,} filtered trades → {stored_output}")
 
     # Optionally save excluded trades
     if config.keep_filtered_trades and config.filtered_csv:
-        excl_mode   = "a" if last_filtered_date is not None and os.path.isfile(config.filtered_csv) else "w"
-        excl_header = (excl_mode == "w")
-        excluded_df.to_csv(config.filtered_csv, mode=excl_mode, header=excl_header, index=False)
-        print(f"  {'Appended' if excl_mode == 'a' else 'Saved'} "
-              f"{len(excluded_df):,} excluded trades → {config.filtered_csv}")
+        append_excluded = last_filtered_date is not None and table_exists(config.filtered_csv)
+        stored_excluded = write_table(
+            excluded_df, config.filtered_csv, append=append_excluded, index=False
+        )
+        print(f"  {'Appended' if append_excluded else 'Saved'} "
+              f"{len(excluded_df):,} excluded trades → {stored_excluded}")
 
     # Save report
     report_path = config.output_csv.replace(".csv", "_filter_report.txt")

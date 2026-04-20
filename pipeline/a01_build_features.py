@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from service.data_prepare import add_macro_features
 from service.preprocess import filter_by_dte, load_csp_files, merge_gex
 from service.env_config import get_derived_file, getenv, config
+from service.table_store import parquet_path, read_table, table_exists, write_table
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +238,8 @@ def main() -> None:
 
     Incremental mode: if the enriched output CSV already exists, only snapshot
     files whose embedded date is newer than the last captureTime in that CSV are
-    loaded and processed (GEX merge + macro features).  New rows are appended to
-    the existing CSV so previously computed work is never repeated.
+    loaded and processed (GEX merge + macro features). New rows are appended to
+    the existing parquet history so previously computed work is never repeated.
     """
     dataset_cfg = config.get_active_dataset_config()
     if not dataset_cfg:
@@ -273,7 +274,7 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Incremental: find the last snapshot date already in the enriched CSV
+    # Incremental: find the last snapshot date already in the enriched dataset
     # so we skip re-loading + re-merging everything that's already done.
     # ------------------------------------------------------------------
     derived_macro_name = get_derived_file(basic_csv)[0]
@@ -281,9 +282,9 @@ def main() -> None:
 
     effective_start = start_date or None
     is_incremental  = False
-    if enriched_path and os.path.isfile(enriched_path):
+    if enriched_path and table_exists(enriched_path):
         try:
-            ct = pd.read_csv(enriched_path, usecols=["captureTime"])
+            ct = read_table(enriched_path, columns=["captureTime"])
             ct["captureTime"] = pd.to_datetime(ct["captureTime"], errors="coerce")
             last = ct["captureTime"].dt.normalize().max()
             if pd.notna(last):
@@ -291,15 +292,15 @@ def main() -> None:
                 if effective_start is None or pd.Timestamp(candidate) > pd.Timestamp(effective_start):
                     effective_start = candidate
                     is_incremental  = True
-                    print(f"[INFO] Incremental mode: enriched CSV covers up to {last.date()}, "
+                    print(f"[INFO] Incremental mode: enriched dataset covers up to {last.date()}, "
                           f"loading new snapshots from {effective_start} onward.")
         except Exception as exc:
-            print(f"[WARN] Could not inspect existing enriched CSV ({exc}); full rebuild.")
+            print(f"[WARN] Could not inspect existing enriched dataset ({exc}); full rebuild.")
 
     if is_incremental and end_date and pd.Timestamp(effective_start) > pd.Timestamp(end_date):
         print(f"[INFO] Already up to date through {end_date}. Nothing to process.")
-        if symbols_file and enriched_path and os.path.isfile(enriched_path):
-            sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"])
+        if symbols_file and enriched_path and table_exists(enriched_path):
+            sym_df = read_table(enriched_path, columns=["baseSymbol"])
             extract_and_write_symbols(sym_df, symbols_file)
         return
 
@@ -328,23 +329,22 @@ def main() -> None:
 
     new_df = out.df
     if new_df.empty:
-        print("[INFO] No new rows after DTE filter. Enriched CSV unchanged.")
-        if symbols_file and enriched_path and os.path.isfile(enriched_path):
-            sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"])
+        print("[INFO] No new rows after DTE filter. Enriched dataset unchanged.")
+        if symbols_file and enriched_path and table_exists(enriched_path):
+            sym_df = read_table(enriched_path, columns=["baseSymbol"])
             extract_and_write_symbols(sym_df, symbols_file)
         return
 
-    # Write (fresh) or append (incremental) enriched CSV
-    if is_incremental and enriched_path and os.path.isfile(enriched_path):
-        new_df.to_csv(enriched_path, mode="a", header=False, index=False)
-        print(f"[INFO] Appended {len(new_df):,} new rows → {enriched_path}")
+    # Write (fresh) or append (incremental) enriched parquet history.
+    stored_path = write_table(new_df, enriched_path, append=is_incremental, index=False)
+    if is_incremental and table_exists(enriched_path):
+        print(f"[INFO] Appended {len(new_df):,} new rows → {stored_path}")
     else:
-        new_df.to_csv(enriched_path, index=False)
-        print(f"[INFO] Wrote {len(new_df):,} rows → {enriched_path}")
+        print(f"[INFO] Wrote {len(new_df):,} rows → {stored_path}")
 
     # Update symbols file from the full (cumulative) enriched dataset
     if symbols_file:
-        sym_df = pd.read_csv(enriched_path, usecols=["baseSymbol"]) if is_incremental else new_df
+        sym_df = read_table(enriched_path, columns=["baseSymbol"]) if is_incremental else new_df
         extract_and_write_symbols(sym_df, symbols_file)
         print("[SUCCESS] Ready for a02_collect_events.py")
     else:
