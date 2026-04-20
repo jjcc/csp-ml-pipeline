@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -70,6 +71,24 @@ def should_write_csv_export(explicit: bool | None = None) -> bool:
     return os.getenv("HISTORY_WRITE_CSV_EXPORTS", "0").strip().lower() in _TRUE_VALUES
 
 
+def _normalize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce mixed object columns into parquet-friendly types when possible."""
+    out = df.copy()
+    for col in out.columns:
+        series = out[col]
+        if series.dtype != "object":
+            continue
+        non_null = series.dropna()
+        if non_null.empty:
+            continue
+        has_temporal_values = non_null.map(
+            lambda value: isinstance(value, (pd.Timestamp, datetime, date))
+        ).any()
+        if has_temporal_values:
+            out[col] = pd.to_datetime(series, errors="coerce")
+    return out
+
+
 def write_table(
     df: pd.DataFrame,
     path: str,
@@ -86,6 +105,7 @@ def write_table(
         existing = read_table(path)
         df = pd.concat([existing, df], ignore_index=False)
 
+    df = _normalize_for_parquet(df)
     df.to_parquet(parquet, index=index)
 
     if should_write_csv_export(write_csv_export):
