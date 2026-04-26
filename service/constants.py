@@ -99,6 +99,25 @@ BIN_PROB_FEATS = [
 # All features combined (training default when WINNER_FEATURES is not set)
 ALL_FEATS = BASE_FEATS + GEX_FEATS + NEW_FEATS
 
+# New GEX indicator features from gex_101_indicator folder (see gex_ml_engine.md).
+# "regime" is categorical and is label-encoded to "regime_enc" at training time.
+# This list uses the raw column names; b13/b14 swap "regime" → "regime_enc" internally.
+NEW_GEX_IND_FEATS = [
+    "gamma_flip",
+    "distance_to_flip",
+    "flip_score",
+    "gamma_density_near",
+    "gamma_density_below",
+    "support_asymmetry",
+    "downside_void",
+    "peak_concentration",
+    "slope_near_price",
+    "negative_gamma_below_ratio",
+    "has_flip",
+    "no_flip_flag",
+    "regime",   # categorical; encoded → regime_enc before fitting
+]
+
 # ---------------------------------------------------------------------------
 # Calendar constants  (replaces magic numbers like `if weekday == 5`)
 # ---------------------------------------------------------------------------

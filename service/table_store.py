@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+_COMPLEX_TYPES = (list, tuple, dict, set)
 
 
 def parquet_path(path: str) -> str:
@@ -86,6 +88,17 @@ def _normalize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
         ).any()
         if has_temporal_values:
             out[col] = pd.to_datetime(series, errors="coerce")
+            continue
+
+        has_complex_values = non_null.map(
+            lambda value: isinstance(value, _COMPLEX_TYPES)
+        ).any()
+        if has_complex_values:
+            out[col] = series.map(
+                lambda value: json.dumps(value, sort_keys=True)
+                if isinstance(value, _COMPLEX_TYPES)
+                else value
+            )
     return out
 
 
