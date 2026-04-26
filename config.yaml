@@ -19,15 +19,34 @@
 rolling_window_weeks:   16            # Training window in weeks (try 16 for more data)
 
 # ============================================================
+# Historical run registry  (auto-reconstructed from score outputs)
+#
+# Each row = one completed pipeline run.
+# Outputs live in output/{winner,tails}_{train,score}/v9_roll{W}w_{YYYYMMDD}/
+#
+# merged_file                   events_start_date  events_end_date  cutoff_date   scored_rows  notes
+# merged_roll14w_20250804.csv   2025-08-04         (no score run)   —             —            14-week window, no b02 run
+# merged_roll16w_20250818.csv   2025-08-18         2025-09-05       2025-09-15    5,167
+# merged_roll16w_20250901.csv   2025-09-01         2025-09-12       2025-09-22    3,773
+# merged_roll16w_20250908.csv   2025-09-08         2025-09-08       2025-09-15      331        single-day score window
+# merged_roll16w_20250915.csv   2025-09-15         2025-09-15       2025-09-22      582        single-day score window
+# merged_roll16w_20250929.csv   2025-09-29         2025-09-29       2025-10-06      399        single-day score window
+# (next run)                    2026-04-07         2026-04-17       2026-04-27        —        ← active below (7-month gap)
+# ============================================================
+
+# ============================================================
 # Single dataset — all option data in one folder, no sub-folders
 # ============================================================
 dataset:
   data_dir:             "option/put"              # all raw snapshot CSVs live here
   data_basic_csv:       "trades_raw_current.csv"  # intermediate raw merge written by a01
   output_csv:           "labeled_trades_current.csv"  # labeled output written by a04
-  cutoff_date:          "2025-11-15"              # ← update when you have new data
-  events_start_date:    "2025-10-27"              # ← update: first day of scoring window
-  events_end_date:      "2025-11-07"              # ← update: last day of scoring window
+  #cutoff_date:          "2026-04-27"              # ← last expiry in data (2026-04-24) + 3d buffer
+  #events_start_date:    "2026-04-07"              # ← first day of scoring window
+  #events_end_date:      "2026-04-17"              # ← last day of scoring window (last labeled trade date)
+  events_start_date:    "2025-08-18"              # ← first day of scoring window
+  events_end_date:      "2025-09-05"              # ← last day of scoring window (last labeled trade date)
+  cutoff_date:          "2025-09-15"              # ← last expiry in data (2026-04-24) + 3d buffer
   events_output:        "output/data_prep/corp_events/events_current.csv"
   tickers_file:         "output/data_prep/corp_events/symbols_in_option_data_current.txt"
   filtered_trades_csv:  "output/filtered/trades_filtered_current.csv"
@@ -199,6 +218,37 @@ tailscoring:
   threshold:        ""             # empty = use best-F1 threshold from model pack
   target_precision: ""             # optional: auto-select threshold at this precision
   target_recall:    ""             # optional: auto-select threshold at this recall
+
+# ============================================================
+# GEX-Only Tail Classifier training  (b13_train_tail_gex.py)
+#
+# STANDALONE — no dependency on b01/b03.
+# Uses only the new GEX indicator features from NEW_GEX_FEATURE_FOLDER.
+# Alignment: GEX.capture_dt <= trade.tradeTime (backward asof merge per symbol).
+# ============================================================
+tail_gex:
+  input:       "output/data_merged/merged_roll{rolling_window_weeks}w_{active_score_date}.csv"
+  output_dir:  "output/tails_gex_train/v1_roll{rolling_window_weeks}w_{active_score_date}/"
+  model_name:  "tail_gex_model"
+  tail_k:      0.05   # worst-k% by return_mon = tail label
+  # gex_folder: leave empty to read NEW_GEX_FEATURE_FOLDER from .env
+  gex_folder:  ""
+
+# ============================================================
+# GEX-Only Tail Classifier scoring  (b14_score_tail_gex.py)
+# ============================================================
+tailgexscoring:
+  score_input:      "output/data_labeled/{active_score_labeled_csv}"
+  model_in:         "output/tails_gex_train/v1_roll{rolling_window_weeks}w_{active_score_date}/tail_gex_model_{active_score_date}.pkl"
+  score_out_folder: "output/tails_gex_score/v1_roll{rolling_window_weeks}w_{active_score_date}"
+  score_out:        "tail_gex_scores_{active_score_date}.csv"
+  proba_col:        "tail_gex_proba"
+  pred_col:         "is_tail_gex_pred"
+  threshold:        ""
+  target_precision: ""
+  target_recall:    ""
+  # gex_folder: leave empty to read NEW_GEX_FEATURE_FOLDER from .env
+  gex_folder:       ""
 
 # ============================================================
 # Evaluation  (eval/eval_classifier.py)

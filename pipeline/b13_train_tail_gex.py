@@ -113,7 +113,12 @@ def merge_gex_to_trades(trades: pd.DataFrame, gex: pd.DataFrame) -> pd.DataFrame
     trades = trades.copy()
     trades["tradeTime"] = pd.to_datetime(trades["tradeTime"], errors="coerce").astype("datetime64[us]")
 
-    gex_by_sym = {sym: grp.sort_values("capture_dt")
+    # tradeTime is stored as midnight (00:00); capture_dt is ~11:00.
+    # Normalize capture_dt to midnight for the merge key so same-day GEX matches.
+    gex = gex.copy()
+    gex["_merge_dt"] = gex["capture_dt"].dt.normalize().astype("datetime64[us]")
+
+    gex_by_sym = {sym: grp.sort_values("_merge_dt")
                   for sym, grp in gex.groupby("symbol")}
 
     pieces = []
@@ -127,12 +132,14 @@ def merge_gex_to_trades(trades: pd.DataFrame, gex: pd.DataFrame) -> pd.DataFrame
             sym_trades_sorted,
             sym_gex.rename(columns={"symbol": "baseSymbol"}),
             left_on="tradeTime",
-            right_on="capture_dt",
+            right_on="_merge_dt",
             direction="backward",
         )
         pieces.append(merged)
 
     result = pd.concat(pieces, ignore_index=True) if pieces else trades.iloc[0:0]
+    if "_merge_dt" in result.columns:
+        result = result.drop(columns=["_merge_dt"])
 
     n_matched = result["distance_to_flip"].notna().sum() if "distance_to_flip" in result.columns else 0
     print(f"[INFO] GEX merge: {len(result):,} trades, "

@@ -315,3 +315,102 @@ All subdirectories under `winner_train/`, `winner_score/`, `tails_train/`, and
 `tails_score/` are named with the pattern `v9_roll{W}w_{YYYYMMDD}` where `W`
 is the window size and `YYYYMMDD` is the score batch's start date — so you can
 tell at a glance which model applies to which time period.
+
+---
+
+## 9. GEX-Only ML Engine (b13 / b14)  — Separate, Independent Process
+
+**b13** and **b14** are a completely standalone pipeline.  They do **not**
+depend on b01, b02, b03, or b04, and do not share model files with them.
+You can run b13/b14 at any time after a05 has produced the rolling-window
+training CSV.
+
+### What it does
+
+Uses only the new GEX indicator features from the `gex_101_indicator` folder:
+
+```
+gamma_flip, distance_to_flip, flip_score, gamma_density_near,
+gamma_density_below, support_asymmetry, downside_void, peak_concentration,
+slope_near_price, negative_gamma_below_ratio, has_flip, no_flip_flag, regime
+```
+
+GEX alignment: for each trade, the most-recent GEX snapshot with
+`capture_dt ≤ tradeTime` is joined per symbol (backward asof merge).
+
+Labels are identical to b03: `tail = 1` when `return_mon ≤ quantile(return_mon, 0.05)`.
+
+### Prerequisites
+
+1. `.env` must have `NEW_GEX_FEATURE_FOLDER=gex_101_indicator` (already set).
+2. `a05_merge_datasets.py` must have run to produce the rolling-window CSV.
+3. The `gex_101_indicator/` folder must exist and contain `*.csv` files with
+   columns: `symbol, capture_dt, gamma_flip, distance_to_flip, …, regime`.
+
+### Running b13 (train)
+
+```bash
+python pipeline/b13_train_tail_gex.py
+```
+
+Outputs (in `output/tails_gex_train/v1_roll{W}w_{YYYYMMDD}/`):
+
+```
+tail_gex_model_{YYYYMMDD}.pkl         — model pack
+tail_gex_scores_oof.csv               — OOF probabilities
+tail_gex_metrics.json                 — AUC-ROC, AUC-PRC, threshold, tail rate
+tail_gex_feature_importances.csv      — feature importances
+```
+
+Key metrics: **OOF AUC-PRC** (imbalanced tail class — this matters more than ROC-AUC).
+
+### Running b14 (score)
+
+```bash
+python pipeline/b14_score_tail_gex.py
+```
+
+Scores the labeled CSV for the active scoring window.
+Outputs → `output/tails_gex_score/v1_roll{W}w_{YYYYMMDD}/tail_gex_scores_{YYYYMMDD}.csv`
+
+Score columns:
+
+| Column | Meaning |
+|--------|---------|
+| `tail_gex_proba` | GEX-derived tail risk probability (0–1) |
+| `is_tail_gex_pred` | 1 = GEX model flags this trade as high-risk |
+
+### Configuration knobs (config.yaml)
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `tail_gex.tail_k` | `0.05` | Worst-k% label cut on return_mon |
+| `tail_gex.gex_folder` | `""` | Override folder; empty = use `NEW_GEX_FEATURE_FOLDER` |
+| `tailgexscoring.threshold` | `""` | Fixed threshold override; empty = use best-F1 from pack |
+| `tailgexscoring.target_precision` | `""` | Auto-select threshold at this precision |
+| `tailgexscoring.target_recall` | `""` | Auto-select threshold at this recall |
+
+### Using with the main pipeline scores (optional)
+
+```python
+import pandas as pd
+
+winner  = pd.read_csv("output/winner_score/v9_roll16w_20251027/scores_20251027.csv")
+gex_tail = pd.read_csv("output/tails_gex_score/v1_roll16w_20251027/tail_gex_scores_20251027.csv")
+
+combined = winner.merge(
+    gex_tail[["baseSymbol", "tradeTime", "tail_gex_proba", "is_tail_gex_pred"]],
+    on=["baseSymbol", "tradeTime"], how="left"
+)
+```
+
+`combined` then has `win_proba` (winner rank) and `tail_gex_proba` (GEX risk)
+as independent reference signals.  Neither overwrites the other.
+
+### Output directory
+
+```
+output/
+├── tails_gex_train/     GEX-only tail models (after b13)
+└── tails_gex_score/     GEX-only tail scored batches (after b14)
+```
