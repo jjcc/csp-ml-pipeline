@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service.env_config import getenv
 from service.preprocess import add_dte_and_normalized_returns
+from service.table_store import read_table, table_exists
 from service.tail_scoring import (
     add_bin_prob_features,
     apply_tail_threshold,
@@ -124,7 +125,7 @@ def load_scoring_config() -> TailScoringConfig:
 
 def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
     """Load and preprocess score data — must match training transforms exactly."""
-    df = pd.read_csv(cfg.csv_in)
+    df = read_table(cfg.csv_in) if table_exists(cfg.csv_in) else pd.read_csv(cfg.csv_in)
 
     # Accept either column name for the symbol
     if "baseSymbol" not in df.columns and "symbol" in df.columns:
@@ -142,6 +143,17 @@ def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
 
     if "tradeTime" in df.columns:
         df["tradeTime"] = pd.to_datetime(df["tradeTime"], errors="coerce")
+
+    # Filter to active scoring window — labeled_trades_current may contain all history.
+    score_start = getenv("DATASET_EVENTS_START_DATE", "").strip()
+    score_end   = getenv("DATASET_EVENTS_END_DATE",   "").strip()
+    if score_start and "tradeTime" in df.columns:
+        n_before = len(df)
+        df = df[df["tradeTime"] >= pd.Timestamp(score_start)]
+        if score_end:
+            df = df[df["tradeTime"] <= pd.Timestamp(score_end)]
+        print(f"[INFO] Scoring window filter {score_start} → {score_end or 'open'}: "
+              f"{n_before:,} → {len(df):,} rows")
 
     return df
 

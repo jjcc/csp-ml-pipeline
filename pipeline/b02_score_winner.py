@@ -23,6 +23,7 @@ from typing import Optional, List
 
 from service.utils import load_env_default, ensure_dir
 from service.preprocess import add_dte_and_normalized_returns
+from service.table_store import read_table, table_exists
 from service.winner_scoring import (
     load_winner_model, score_winner_data, apply_winner_threshold,
     select_winner_threshold, calculate_winner_metrics, extract_labels,
@@ -125,7 +126,8 @@ def pick_threshold_from_coverage(proba: np.ndarray, coverage: float) -> float:
 
 def load_and_preprocess_data(config: ScoringConfig) -> pd.DataFrame:
     """Load and preprocess input data."""
-    df = pd.read_csv(config.csv_in)
+    # Prefer parquet over stale CSV export (read_table falls back to CSV if no parquet).
+    df = read_table(config.csv_in) if table_exists(config.csv_in) else pd.read_csv(config.csv_in)
 
     # Validate required columns exist — the labeled CSV uses "baseSymbol", not "symbol"
     required_cols = ["baseSymbol", "tradeTime"]
@@ -146,6 +148,18 @@ def load_and_preprocess_data(config: ScoringConfig) -> pd.DataFrame:
 
     if "tradeTime" in df.columns:
         df["tradeTime"] = pd.to_datetime(df["tradeTime"], errors="coerce")
+
+    # Filter to the active scoring window so we don't score stale history when
+    # labeled_trades_current accumulates multiple batches.
+    score_start = getenv("DATASET_EVENTS_START_DATE", "").strip()
+    score_end   = getenv("DATASET_EVENTS_END_DATE",   "").strip()
+    if score_start and "tradeTime" in df.columns:
+        n_before = len(df)
+        df = df[df["tradeTime"] >= pd.Timestamp(score_start)]
+        if score_end:
+            df = df[df["tradeTime"] <= pd.Timestamp(score_end)]
+        print(f"[INFO] Scoring window filter {score_start} → {score_end or 'open'}: "
+              f"{n_before:,} → {len(df):,} rows")
 
     # Apply train/test split filtering
     if config.split_file and not config.use_oof:

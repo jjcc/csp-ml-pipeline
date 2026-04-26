@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from service.env_config import getenv
 from service.tail_scoring import apply_tail_threshold, fill_features
 from service.utils import ensure_dir
+from service.table_store import read_table, table_exists
 
 # reuse GEX loading helpers from b13
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -101,22 +102,6 @@ def load_scoring_config() -> GexScoringConfig:
         target_recall=float(rec_str) if rec_str else None,
         gex_folder=gex_folder,
     )
-
-
-# ---------------------------------------------------------------------------
-# Regime encoding (inference)
-# ---------------------------------------------------------------------------
-
-def apply_regime_encoder(df: pd.DataFrame, le) -> pd.DataFrame:
-    """Encode 'regime' → 'regime_enc' using the saved LabelEncoder.
-    Unknown regimes map to 'unknown' (always trained-in)."""
-    df = df.copy()
-    known = set(le.classes_)
-    raw = df["regime"].fillna("unknown").astype(str) if "regime" in df.columns \
-          else pd.Series(["unknown"] * len(df))
-    mapped = raw.map(lambda x: x if x in known else "unknown")
-    df["regime_enc"] = le.transform(mapped)
-    return df
 
 
 # ---------------------------------------------------------------------------
@@ -183,17 +168,24 @@ def main() -> None:
 
     # ── Load and merge candidates ─────────────────────────────────────────────
     print(f"[INFO] Loading candidates: {cfg.csv_in}")
-    df = pd.read_csv(cfg.csv_in)
+    df = read_table(cfg.csv_in) if table_exists(cfg.csv_in) else pd.read_csv(cfg.csv_in)
     if "baseSymbol" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "baseSymbol"})
     print(f"[INFO] {len(df):,} rows loaded")
 
-    df = merge_gex_to_trades(df, gex)
+    # Filter to active scoring window before GEX merge (cheaper on fewer rows).
+    df["tradeTime"] = pd.to_datetime(df["tradeTime"], errors="coerce")
+    score_start = getenv("DATASET_EVENTS_START_DATE", "").strip()
+    score_end   = getenv("DATASET_EVENTS_END_DATE",   "").strip()
+    if score_start:
+        n_before = len(df)
+        df = df[df["tradeTime"] >= pd.Timestamp(score_start)]
+        if score_end:
+            df = df[df["tradeTime"] <= pd.Timestamp(score_end)]
+        print(f"[INFO] Scoring window filter {score_start} → {score_end or 'open'}: "
+              f"{n_before:,} → {len(df):,} rows")
 
-    # ── Encode regime ─────────────────────────────────────────────────────────
-    le = pack.get("regime_encoder")
-    if le is not None:
-        df = apply_regime_encoder(df, le)
+    df = merge_gex_to_trades(df, gex)
 
     # ── Score ─────────────────────────────────────────────────────────────────
     feat_list = pack["features"]

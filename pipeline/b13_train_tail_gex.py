@@ -36,7 +36,6 @@ from lightgbm import LGBMClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import LabelEncoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -76,17 +75,19 @@ class GexTailConfig:
 # ---------------------------------------------------------------------------
 
 def load_gex_indicators(gex_folder: str) -> pd.DataFrame:
-    """Load all CSVs from gex_folder; keep one snapshot per (symbol, date) near 11:00."""
+    """Load all monthly parquet files from gex_folder; keep one snapshot per (symbol, date) near 11:00."""
     folder = Path(gex_folder)
-    paths = sorted(folder.glob("*.csv"))
+    paths = sorted(folder.glob("*.parquet"))
     if not paths:
-        raise FileNotFoundError(f"No CSV files found in GEX folder: {gex_folder}")
+        raise FileNotFoundError(f"No parquet files found in GEX folder: {gex_folder}")
 
-    frames = [pd.read_csv(p) for p in paths]
-    gex = pd.concat(frames, ignore_index=True)
+    gex = pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
 
-    gex["capture_dt"] = pd.to_datetime(gex["capture_dt"], errors="coerce")
+    gex["capture_dt"] = pd.to_datetime(gex["capture_dt"], errors="coerce").astype("datetime64[us]")
     gex = gex.dropna(subset=["capture_dt", "symbol"]).copy()
+    # has_flip is bool in parquet — cast to float so fill_features median works cleanly
+    if "has_flip" in gex.columns:
+        gex["has_flip"] = gex["has_flip"].astype(float)
 
     # Keep one snapshot per (symbol, date): closest to 11:00
     TARGET_MIN = 11 * 60
@@ -110,7 +111,7 @@ def merge_gex_to_trades(trades: pd.DataFrame, gex: pd.DataFrame) -> pd.DataFrame
     per symbol and concat rather than using the `by` parameter.
     """
     trades = trades.copy()
-    trades["tradeTime"] = pd.to_datetime(trades["tradeTime"], errors="coerce")
+    trades["tradeTime"] = pd.to_datetime(trades["tradeTime"], errors="coerce").astype("datetime64[us]")
 
     gex_by_sym = {sym: grp.sort_values("capture_dt")
                   for sym, grp in gex.groupby("symbol")}
@@ -143,19 +144,9 @@ def merge_gex_to_trades(trades: pd.DataFrame, gex: pd.DataFrame) -> pd.DataFrame
 # Feature prep
 # ---------------------------------------------------------------------------
 
-def encode_regime(df: pd.DataFrame) -> tuple[pd.DataFrame, LabelEncoder]:
-    """Label-encode the 'regime' column → 'regime_enc'.  Ensures 'unknown' is always a class."""
-    df = df.copy()
-    raw = df["regime"].fillna("unknown").astype(str) if "regime" in df.columns else pd.Series(["unknown"] * len(df))
-    all_classes = sorted(set(raw) | {"unknown"})
-    le = LabelEncoder()
-    le.fit(all_classes)
-    df["regime_enc"] = le.transform(raw)
-    return df, le
-
-
 def build_feat_list() -> list[str]:
-    return ["regime_enc" if f == "regime" else f for f in NEW_GEX_IND_FEATS]
+    """Return the GEX feature list.  regime is already float64 (1.0/-1.0) — no encoding needed."""
+    return list(NEW_GEX_IND_FEATS)
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +231,6 @@ def main() -> None:
     gex = load_gex_indicators(cfg.gex_folder)
     df  = merge_gex_to_trades(trades, gex)
 
-    # ── Encode regime ─────────────────────────────────────────────────────────
-    df, le = encode_regime(df)
-
     # ── Tail labels ───────────────────────────────────────────────────────────
     if "return_mon" not in df.columns:
         raise SystemExit("[ERROR] 'return_mon' not found — run a04_label_data.py first.")
@@ -313,7 +301,6 @@ def main() -> None:
         "calibrator":          cal,
         "features":            feat_list,
         "medians":             medians,
-        "regime_encoder":      le,
         "oof_best_threshold":  best_thr,
         "oof_auc":             oof_auc,
         "oof_avg_precision":   oof_ap,

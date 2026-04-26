@@ -99,9 +99,10 @@ BIN_PROB_FEATS = [
 # All features combined (training default when WINNER_FEATURES is not set)
 ALL_FEATS = BASE_FEATS + GEX_FEATS + NEW_FEATS
 
-# New GEX indicator features from gex_101_indicator folder (see gex_ml_engine.md).
-# "regime" is categorical and is label-encoded to "regime_enc" at training time.
-# This list uses the raw column names; b13/b14 swap "regime" → "regime_enc" internally.
+# New GEX indicator features from gex101_indicator folder (see gex_ml_engine.md).
+# All are numeric. "regime" is float64 (1.0 = positive, -1.0 = negative).
+# "has_flip" is bool → cast to float (1.0/0.0) by fill_features.
+# Note: "no_flip_flag" does NOT exist in the actual parquet files.
 NEW_GEX_IND_FEATS = [
     "gamma_flip",
     "distance_to_flip",
@@ -114,8 +115,7 @@ NEW_GEX_IND_FEATS = [
     "slope_near_price",
     "negative_gamma_below_ratio",
     "has_flip",
-    "no_flip_flag",
-    "regime",   # categorical; encoded → regime_enc before fitting
+    "regime",   # float64: 1.0 = positive gamma regime, -1.0 = negative
 ]
 
 # ---------------------------------------------------------------------------
