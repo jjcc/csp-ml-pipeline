@@ -55,6 +55,7 @@ class ScoringConfig:
     train_epsilon: float
     write_sweep: bool
     process_on_fly: bool
+    gex_folder: str = ""   # optional GEX indicator folder for NEW_GEX_IND_FEATS
 
 
 def load_scoring_config() -> ScoringConfig:
@@ -89,6 +90,8 @@ def load_scoring_config() -> ScoringConfig:
     if split_file:
         split_file = os.path.join(getenv("WINNER_OUTPUT_DIR", "output"), split_file)
 
+    gex_folder = getenv("WINNERSCORE_GEX_FOLDER", "").strip()
+
     return ScoringConfig(
         csv_in=csv_in,
         model_in=model_in,
@@ -109,7 +112,8 @@ def load_scoring_config() -> ScoringConfig:
         use_oof=True,
         train_epsilon=float(getenv("WINNER_TRAIN_EPSILON", "0.00")),
         write_sweep=str(getenv("WRITE_SWEEP", "1")).lower() in {"1", "true", "yes", "y", "on"},
-        process_on_fly=str(getenv("PROCESS_ON_FLY", "0")).lower() in {"1", "true", "yes", "y", "on"}
+        process_on_fly=str(getenv("PROCESS_ON_FLY", "0")).lower() in {"1", "true", "yes", "y", "on"},
+        gex_folder=gex_folder,
     )
 
 
@@ -306,6 +310,18 @@ def main():
     else:
         print("Using pre-processed data (validation mode)")
         df = load_and_preprocess_data(config)
+
+    # Optionally merge GEX indicator features (model must have been trained with them)
+    if config.gex_folder:
+        try:
+            from pipeline.b13_train_tail_gex import load_gex_indicators, merge_gex_to_trades
+            print(f"[INFO] Loading GEX indicators from: {config.gex_folder}")
+            gex = load_gex_indicators(config.gex_folder)
+            df = merge_gex_to_trades(df, gex)
+            match_rate = df["distance_to_flip"].notna().mean()
+            print(f"[INFO] GEX merge: {match_rate:.1%} of rows matched")
+        except Exception as e:
+            print(f"[WARN] GEX merge failed ({e}) — scoring without GEX indicator features")
 
     # Score using shared function
     out, proba, _ = score_winner_data(df, model_pack, config.proba_col)

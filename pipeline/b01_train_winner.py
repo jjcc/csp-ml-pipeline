@@ -47,9 +47,10 @@ import joblib
 # Ensure project root is on path when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from service.constants import BASE_FEATS, NEW_FEATS
+from service.constants import BASE_FEATS, NEW_FEATS, NEW_GEX_IND_FEATS
 from service.preprocess import add_dte_and_normalized_returns
 from service.env_config import getenv, config as _cfg_loader
+from service.table_store import read_table, table_exists
 from service.utils import ensure_dir
 
 
@@ -107,6 +108,8 @@ class WinnerClassifierConfig:
         # Feature selection (subset of ALL_FEATS used by default)
         gex_subset      = ["gex_neg", "gex_center_abs_strike", "gex_total_abs"]
         self.features   = BASE_FEATS + NEW_FEATS + gex_subset
+        # Optional: GEX indicator folder — NEW_GEX_IND_FEATS appended in main() after merge
+        self.gex_folder = getenv("WINNER_GEX_FOLDER", "").strip()
         self.id_cols    = self._list_str(getenv("WINNER_ID_COLS", ""))
 
         # Model
@@ -740,9 +743,29 @@ def main():
     prep  = DataPreprocessor(cfg)
     cv    = CrossValidator(cfg, prep)
 
-    # Load and sort data
-    df = pd.read_csv(cfg.input_csv)
+    # Load and sort data (prefer parquet over stale CSV export)
+    from service.table_store import resolve_read_path
+    actual_path = resolve_read_path(cfg.input_csv) if table_exists(cfg.input_csv) else cfg.input_csv
+    print(f"[INFO] Loading training data: {actual_path}")
+    df = read_table(cfg.input_csv) if table_exists(cfg.input_csv) else pd.read_csv(cfg.input_csv)
     df = df.sort_values(["captureTime", "symbol"], kind="mergesort").reset_index(drop=True)
+    print(f"[INFO] Loaded {len(df):,} rows")
+
+    # Optionally merge GEX indicator features
+    if cfg.gex_folder:
+        try:
+            from pipeline.b13_train_tail_gex import load_gex_indicators, merge_gex_to_trades
+            print(f"[INFO] Loading GEX indicators from: {cfg.gex_folder}")
+            gex = load_gex_indicators(cfg.gex_folder)
+            df = merge_gex_to_trades(df, gex)
+            gex_present = [f for f in NEW_GEX_IND_FEATS if f in df.columns]
+            if gex_present:
+                cfg.features = cfg.features + gex_present
+                match_rate = df["distance_to_flip"].notna().mean()
+                print(f"[INFO] Added {len(gex_present)} GEX indicator features "
+                      f"(match rate {match_rate:.1%}): {gex_present}")
+        except Exception as e:
+            print(f"[WARN] GEX merge failed ({e}) — training without GEX indicator features")
 
     # Use the score date (YYYYMMDD) as the model identifier — self-documenting and
     # consistent with all other output filenames in the rolling-window pipeline.

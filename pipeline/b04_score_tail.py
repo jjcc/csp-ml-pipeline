@@ -257,6 +257,16 @@ def main() -> None:
         target_recall=cfg.target_recall,
     )
 
+    # ── Safety cap: never flag more than 20% of trades ───────────────────────
+    # When the precision target can't be met and OOF fallback is too low, use
+    # the 90th percentile of scored probabilities as a minimum floor.
+    flag_rate = (proba >= chosen_thr).mean()
+    if flag_rate > 0.20:
+        p90_thr = float(np.percentile(proba, 90))
+        print(f"[WARN] Threshold {chosen_thr:.4f} would flag {flag_rate:.1%} of trades "
+              f"(>20% cap) — raising to p90={p90_thr:.4f}")
+        chosen_thr = p90_thr
+
     # ── Apply threshold ───────────────────────────────────────────────────────
     out = apply_tail_threshold(out, cfg.proba_col, cfg.pred_col, chosen_thr)
 
