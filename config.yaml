@@ -116,6 +116,8 @@ winner:
   time_col:               "captureTime"  # column used for per_day grouping
 
   model_name:             "winner_classifier_model"   # suffix _{date}_{type}.pkl added by b01
+  # GEX indicator folder — adds NEW_GEX_IND_FEATS as supplementary features
+  gex_folder:             "gex101_indicator"
 
   # Cross-validation
   oof_folds:              5
@@ -164,6 +166,8 @@ winnerscore:
 
   proba_col: "win_proba"
   pred_col:  "win_predict"
+  # GEX indicator folder — must match what b01 was trained with
+  gex_folder: "gex101_indicator"
 
   split_file: "winner_scores_split.csv"
   oof_file:   ""

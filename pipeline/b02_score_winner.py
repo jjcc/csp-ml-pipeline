@@ -340,6 +340,15 @@ def main():
         target_recalls=config.target_recalls
     )
 
+    # Safety: when base win rate > target precision, auto_calibrate returns threshold≈0
+    # (precision already satisfied by base rate), flagging everything.  Cap at top-30%.
+    flag_rate = (proba >= chosen_thr).mean()
+    if flag_rate > 0.50:
+        p70_thr = float(np.percentile(proba, 70))
+        print(f"[WARN] Threshold {chosen_thr:.6f} would flag {flag_rate:.1%} of trades "
+              f"(>50% cap) — raising to p70={p70_thr:.4f} (top 30% by win_proba)")
+        chosen_thr = p70_thr
+
     # Apply threshold using shared function
     out = apply_winner_threshold(out, config.proba_col, config.pred_col, chosen_thr)
     out["win_labeled"] = y if y is not None else np.nan
