@@ -167,7 +167,9 @@ def main() -> None:
     gex = load_gex_indicators(cfg.gex_folder)
 
     # ── Load and merge candidates ─────────────────────────────────────────────
-    print(f"[INFO] Loading candidates: {cfg.csv_in}")
+    from service.table_store import resolve_read_path
+    actual_path = resolve_read_path(cfg.csv_in) if table_exists(cfg.csv_in) else cfg.csv_in
+    print(f"[INFO] Loading candidates: {actual_path}")
     df = read_table(cfg.csv_in) if table_exists(cfg.csv_in) else pd.read_csv(cfg.csv_in)
     if "baseSymbol" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "baseSymbol"})

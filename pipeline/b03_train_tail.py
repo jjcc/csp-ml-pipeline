@@ -45,7 +45,7 @@ from sklearn.metrics import average_precision_score, precision_recall_curve, roc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from service.constants import BIN_PROB_FEATS, TAIL_FEATS, TAIL_EARNINGS_FEATS
+from service.constants import BIN_PROB_FEATS, NEW_GEX_IND_FEATS, TAIL_FEATS, TAIL_EARNINGS_FEATS
 from service.env_config import getenv, config as _cfg_loader
 from service.tail_scoring import (
     TailModelPack,
@@ -77,6 +77,9 @@ class TailClassifierConfig:
         # Worst-k% absolute quantile cut on return_mon.
         # tail = 1 when return_mon <= quantile(return_mon, tail_k).
         self.tail_k = float(getenv("TAIL_TAIL_K", "0.05"))
+
+        # Optional: GEX indicator folder to merge NEW_GEX_IND_FEATS alongside TAIL_FEATS
+        self.gex_folder = getenv("TAIL_GEX_FOLDER", "").strip()
 
         if not self.winner_oof_csv:
             raise SystemExit(
@@ -133,6 +136,19 @@ def load_and_merge(cfg: TailClassifierConfig) -> pd.DataFrame:
     # Keep only rows with valid OOF predictions
     df = df[df["has_oof"] == 1].copy()
     print(f"[INFO] Merged trades with valid OOF: {len(df):,}")
+
+    # Optional: merge GEX indicator features
+    if cfg.gex_folder:
+        try:
+            from pipeline.b13_train_tail_gex import load_gex_indicators, merge_gex_to_trades
+            print(f"[INFO] Loading GEX indicators from: {cfg.gex_folder}")
+            gex = load_gex_indicators(cfg.gex_folder)
+            df = merge_gex_to_trades(df, gex)
+            match_rate = df["distance_to_flip"].notna().mean()
+            print(f"[INFO] GEX merge: {match_rate:.1%} of training rows matched GEX data")
+        except Exception as e:
+            print(f"[WARN] GEX merge failed ({e}) — training without GEX features")
+
     return df
 
 
@@ -163,6 +179,12 @@ def build_features(df: pd.DataFrame,
         feat_list += earnings_present
         if earnings_present:
             print(f"[INFO] Including earnings features: {earnings_present}")
+
+    # Add GEX indicator features when present (merged by load_and_merge)
+    gex_present = [f for f in NEW_GEX_IND_FEATS if f in df.columns]
+    if gex_present:
+        feat_list += gex_present
+        print(f"[INFO] Including {len(gex_present)} GEX indicator features: {gex_present}")
 
     # Warn about any features the model expects but the data doesn't have
     missing = [f for f in feat_list if f not in df.columns]

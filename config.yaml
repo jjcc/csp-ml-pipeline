@@ -199,6 +199,9 @@ tail:
   # tail = 1 when return_mon <= quantile(return_mon, tail_k).
   # Try 0.10 if 0.05 produces too few tail examples.
   tail_k:        0.05
+  # GEX indicator folder (NEW_GEX_IND_FEATS merged as supplementary features).
+  # Leave empty to disable. Falls back to NEW_GEX_FEATURE_FOLDER in .env.
+  gex_folder:    "gex101_indicator"
 
 # ============================================================
 # Tail Loss Classifier scoring  (b04_score_tail.py)
@@ -216,8 +219,10 @@ tailscoring:
   proba_col:        "tail_proba"
   pred_col:         "is_tail_pred"
   threshold:        ""             # empty = use best-F1 threshold from model pack
-  target_precision: ""             # optional: auto-select threshold at this precision
+  target_precision: "0.10"        # flag trades where precision >= 10% (2x lift over 5% base rate)
   target_recall:    ""             # optional: auto-select threshold at this recall
+  # GEX indicator folder — must match what b03 was trained with
+  gex_folder:       "gex101_indicator"
 
 # ============================================================
 # GEX-Only Tail Classifier training  (b13_train_tail_gex.py)

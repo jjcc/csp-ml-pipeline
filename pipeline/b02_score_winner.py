@@ -127,6 +127,9 @@ def pick_threshold_from_coverage(proba: np.ndarray, coverage: float) -> float:
 def load_and_preprocess_data(config: ScoringConfig) -> pd.DataFrame:
     """Load and preprocess input data."""
     # Prefer parquet over stale CSV export (read_table falls back to CSV if no parquet).
+    from service.table_store import resolve_read_path
+    actual_path = resolve_read_path(config.csv_in) if table_exists(config.csv_in) else config.csv_in
+    print(f"[INFO] Loading score input: {actual_path}")
     df = read_table(config.csv_in) if table_exists(config.csv_in) else pd.read_csv(config.csv_in)
 
     # Validate required columns exist — the labeled CSV uses "baseSymbol", not "symbol"

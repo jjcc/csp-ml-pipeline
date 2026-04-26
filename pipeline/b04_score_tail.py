@@ -72,6 +72,7 @@ class TailScoringConfig:
     fixed_threshold:  Optional[float]
     target_precision: Optional[float]
     target_recall:    Optional[float]
+    gex_folder:       str = ""      # optional GEX indicator folder for NEW_GEX_IND_FEATS
 
 
 def load_scoring_config() -> TailScoringConfig:
@@ -105,6 +106,8 @@ def load_scoring_config() -> TailScoringConfig:
     prec_str = getenv("TAILSCORING_TARGET_PRECISION", "").strip()
     rec_str  = getenv("TAILSCORING_TARGET_RECALL",    "").strip()
 
+    gex_folder = getenv("TAILSCORING_GEX_FOLDER", "").strip()
+
     return TailScoringConfig(
         csv_in=csv_in,
         model_in=model_in,
@@ -116,6 +119,7 @@ def load_scoring_config() -> TailScoringConfig:
         fixed_threshold=fixed_thr,
         target_precision=float(prec_str) if prec_str else None,
         target_recall=float(rec_str) if rec_str else None,
+        gex_folder=gex_folder,
     )
 
 
@@ -125,6 +129,9 @@ def load_scoring_config() -> TailScoringConfig:
 
 def load_and_preprocess(cfg: TailScoringConfig) -> pd.DataFrame:
     """Load and preprocess score data — must match training transforms exactly."""
+    from service.table_store import resolve_read_path
+    actual_path = resolve_read_path(cfg.csv_in) if table_exists(cfg.csv_in) else cfg.csv_in
+    print(f"[INFO] Loading score input: {actual_path}")
     df = read_table(cfg.csv_in) if table_exists(cfg.csv_in) else pd.read_csv(cfg.csv_in)
 
     # Accept either column name for the symbol
@@ -212,6 +219,18 @@ def main() -> None:
     df = load_and_preprocess(cfg)
     print(f"[INFO] {len(df):,} rows loaded from {cfg.csv_in}")
 
+    # ── Optionally merge GEX indicator features ───────────────────────────────
+    if cfg.gex_folder:
+        try:
+            from pipeline.b13_train_tail_gex import load_gex_indicators, merge_gex_to_trades
+            print(f"[INFO] Loading GEX indicators from: {cfg.gex_folder}")
+            gex = load_gex_indicators(cfg.gex_folder)
+            df = merge_gex_to_trades(df, gex)
+            match_rate = df["distance_to_flip"].notna().mean()
+            print(f"[INFO] GEX merge: {match_rate:.1%} of rows matched GEX data")
+        except Exception as e:
+            print(f"[WARN] GEX merge failed ({e}) — scoring without GEX features")
+
     # ── Apply winner model to generate p_bin0-3 and conflict_score features ──
     print(f"[INFO] Applying winner model to generate bin probability features…")
     df = add_bin_prob_features(df, winner_pack)
@@ -221,9 +240,18 @@ def main() -> None:
     # ── Score with tail model (applies calibrator if present) ─────────────────
     out, proba = score_tail_data(df, pack, cfg.proba_col)
 
-    # ── Threshold selection (no labels available for new data) ────────────────
+    # ── Extract labels if the scored data contains return_mon ─────────────────
+    y_score = None
+    if "return_mon" in out.columns:
+        tail_cut = float(out["return_mon"].quantile(pack.tail_rate))
+        y_score = (out["return_mon"] <= tail_cut).astype(int).values
+        n_tails = int(y_score.sum())
+        print(f"[INFO] Labels found in scoring data: {n_tails}/{len(y_score)} tails "
+              f"({y_score.mean():.1%}) — using for threshold calibration")
+
+    # ── Threshold selection ───────────────────────────────────────────────────
     chosen_thr = select_tail_threshold(
-        proba, None, pack,
+        proba, y_score, pack,
         fixed_threshold=cfg.fixed_threshold,
         target_precision=cfg.target_precision,
         target_recall=cfg.target_recall,
